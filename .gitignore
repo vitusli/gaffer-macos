@@ -1,0 +1,5 @@
+release-*/
+build-*/
+gaffer-launcher
+*.tar.gz
+.sconsign.dblite

@@ -1,5 +1,6 @@
 # gaffer-macos
 
+
 Build [Gaffer](https://gafferhq.org) with Cycles rendering on macOS Apple Silicon (M-series).
 
 This repo contains a self-contained build script that downloads Gaffer 1.6.14.2 source,
@@ -10,7 +11,7 @@ Cycles viewport and batch rendering.
 ## Quick start
 
 ```
-git clone https://github.com/<you>/gaffer-macos.git
+git clone https://github.com/vitusli/gaffer-macos.git
 cd gaffer-macos
 make build   # ~30 min first time
 make run
@@ -33,6 +34,12 @@ The build script will install `scons` and `inkscape` via Homebrew if not present
 | `make run` | Launch Gaffer |
 | `make smoke` | Quick import test |
 | `make clean` | Remove source + build directories |
+
+## Known limitations
+
+- CPU rendering only
+- No OSL
+- OpenGL 2.1
 
 ## What the patches fix
 

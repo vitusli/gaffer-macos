@@ -796,12 +796,8 @@ EOF
 build_gaffer() {
   step "Building Gaffer"
   ( cd "$RELEASE_DIR" && rm -f .sconsign.dblite && \
-    scons -j "$(sysctl -n hw.ncpu)" buildCore \
-      BUILD_DIR="$BUILD_DIR" \
-      INKSCAPE=disableGraphics && \
-    scons -j "$(sysctl -n hw.ncpu)" buildExtensions \
-      BUILD_DIR="$BUILD_DIR" \
-      INKSCAPE=disableGraphics )
+    scons -j "$(sysctl -n hw.ncpu)" build \
+      BUILD_DIR="$BUILD_DIR" )
 }
 
 # ── 7. Smoke test ───────────────────────────────────────────────────

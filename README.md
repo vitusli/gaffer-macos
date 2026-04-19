@@ -5,8 +5,7 @@ Build [Gaffer](https://gafferhq.org) with Cycles rendering on macOS Apple Silico
 
 This repo contains a self-contained build script that downloads Gaffer 1.6.14.2 source,
 applies patches to fix macOS-specific issues, downloads pre-built dependencies, and
-compiles everything with SCons. The result is a fully working Gaffer installation with
-Cycles viewport and batch rendering.
+compiles everything with SCons.
 
 ## Quick start
 
@@ -38,6 +37,7 @@ The build script will install `scons` and `inkscape` via Homebrew if not present
 ## Known limitations
 
 - CPU rendering only
+- Viewport rendering only
 - No OSL
 - OpenGL 2.1
 

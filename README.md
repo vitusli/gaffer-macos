@@ -18,7 +18,7 @@ make run
 
 ## Requirements
 
-- macOS on Apple Silicon (M1/M2/M3/M4)
+- macOS on Apple Silicon
 - Xcode command-line tools (`xcode-select --install`)
 - [Homebrew](https://brew.sh)
 - ~10 GB disk space
@@ -37,7 +37,6 @@ The build script will install `scons` and `inkscape` via Homebrew if not present
 ## Known limitations
 
 - CPU rendering only
-- Viewport rendering only
 - No OSL
 - OpenGL 2.1
 

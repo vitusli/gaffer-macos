@@ -78,6 +78,10 @@ download_dependencies() {
 
 relocate_dependencies() {
   step "Relocating dependency paths"
+  if [ -f "$BUILD_DIR/.relocated" ]; then
+    echo "Already relocated (marker file present)"
+    return
+  fi
   python3 - "$BUILD_DIR" <<'PY'
 import os, subprocess, sys
 
@@ -122,11 +126,32 @@ for dirpath, _, filenames in os.walk(root):
                     ["install_name_tool", "-change", dep, dep.replace(old, root), path]
                 )
                 changed = True
+        # Fix LC_RPATH entries
+        try:
+            rpath_out = subprocess.check_output(
+                ["otool", "-l", path], text=True, stderr=subprocess.DEVNULL
+            )
+        except subprocess.CalledProcessError:
+            rpath_out = ""
+        for line in rpath_out.splitlines():
+            line = line.strip()
+            if line.startswith("path ") and old in line:
+                old_rpath = line.split("path ", 1)[1].split(" (offset", 1)[0].strip()
+                new_rpath = old_rpath.replace(old, root)
+                try:
+                    subprocess.check_call(
+                        ["install_name_tool", "-rpath", old_rpath, new_rpath, path]
+                    )
+                    changed = True
+                except subprocess.CalledProcessError:
+                    pass
+
         if changed:
             patched += 1
 
 print(f"Relocated {patched} Mach-O binaries")
 PY
+  touch "$BUILD_DIR/.relocated"
 }
 
 # ── 4. Apply source patches ─────────────────────────────────────────
@@ -164,6 +189,18 @@ if '-Wno-error=cast-function-type-mismatch' not in text:
 sconstruct.write_text(text)
 print("  [a] SConstruct")
 
+# ── a2) SConstruct: add @loader_path rpath for macOS shared libs ──
+text = sconstruct.read_text()
+if '@loader_path/../lib' not in text:
+    text = text.replace(
+        'env["GAFFER_PLATFORM"] = "macos"\n\n\telse :',
+        'env["GAFFER_PLATFORM"] = "macos"\n'
+        '\t\tenv.Append( SHLINKFLAGS = [ "-Wl,-rpath,@loader_path/../lib", "-Wl,-rpath,@loader_path/../../lib" ] )\n\n'
+        '\telse :',
+    )
+    sconstruct.write_text(text)
+print("  [a2] SConstruct rpath")
+
 # ── b) TweakPlug.cpp: fmt::format enum fix ──
 tweak = root / "src/Gaffer/TweakPlug.cpp"
 text = tweak.read_text()
@@ -194,6 +231,12 @@ if 'gafferPythonHome="$rootDir/lib/Python.framework/Versions/Current"' not in te
     text = text.replace(
         'exec python "$rootDir/bin/_gaffer.py" "$@"',
         'exec "$gafferPython" "$rootDir/bin/_gaffer.py" "$@"',
+    )
+# Ensure DYLD_LIBRARY_PATH is set for macOS (LD_LIBRARY_PATH doesn't work)
+if 'DYLD_LIBRARY_PATH' not in text:
+    text = text.replace(
+        'prependToPath "$rootDir/lib" DYLD_FRAMEWORK_PATH\nfi',
+        'prependToPath "$rootDir/lib" DYLD_FRAMEWORK_PATH\n\tprependToPath "$rootDir/lib" DYLD_LIBRARY_PATH\nfi',
     )
 launcher.write_text(text)
 print("  [c] bin/gaffer")
@@ -452,7 +495,9 @@ otxt = otxt.replace(
 )
 
 # h.4) GLSL shaders: macOS GLSL 1.20 + GL_EXT_gpu_shader4
-otxt = otxt.replace(
+# Only apply if not already patched (idempotency guard)
+if '#ifdef __APPLE__\n\nconst char *g_vertexSource' not in otxt:
+  otxt = otxt.replace(
     'const char *g_vertexSource = R"(\n'
     '\n'
     '#version 330 compatibility\n'
@@ -468,9 +513,10 @@ otxt = otxt.replace(
     'attribute vec2 P; // Receives unit quad\n'
     'varying vec2 texCoords;\n',
     1
-)
+  )
 
-otxt = otxt.replace(
+if '#else // !__APPLE__' not in otxt:
+  otxt = otxt.replace(
     'const char *g_fragmentSource = R"(\n'
     '\n'
     '#version 330 compatibility\n'
@@ -795,9 +841,42 @@ EOF
 
 build_gaffer() {
   step "Building Gaffer"
-  ( cd "$RELEASE_DIR" && rm -f .sconsign.dblite && \
+  ( cd "$RELEASE_DIR" && \
     scons -j "$(sysctl -n hw.ncpu)" build \
       BUILD_DIR="$BUILD_DIR" )
+}
+
+# ── 6b. Fix install names of freshly-built Gaffer libs ──────────────
+
+fixup_gaffer_install_names() {
+  step "Fixing install names of built libraries"
+  local bd="$BUILD_DIR"
+
+  # Fix dylibs in lib/ — change id from "lib/libXxx.dylib" to "@rpath/libXxx.dylib"
+  for f in "$bd"/lib/*.dylib; do
+    [ -f "$f" ] || continue
+    local cur_id
+    cur_id=$(otool -D "$f" | tail -1)
+    local base
+    base=$(basename "$cur_id")
+    if [[ "$cur_id" != @rpath/* ]]; then
+      install_name_tool -id "@rpath/$base" "$f" 2>/dev/null || true
+    fi
+  done
+
+  # Fix all .so and .dylib that reference "lib/libXxx.dylib" (bare relative)
+  for f in "$bd"/lib/*.dylib "$bd"/python/*/*.so; do
+    [ -f "$f" ] || continue
+    otool -L "$f" 2>/dev/null | awk 'NR>1{print $1}' | while read -r dep; do
+      if [[ "$dep" == lib/lib*.dylib ]]; then
+        local base
+        base=$(basename "$dep")
+        install_name_tool -change "$dep" "@rpath/$base" "$f" 2>/dev/null || true
+      fi
+    done
+  done
+
+  echo "  Done."
 }
 
 # ── 7. Smoke test ───────────────────────────────────────────────────
@@ -821,6 +900,17 @@ main() {
 
   ensure_brew_pkg scons
   ensure_brew_pkg inkscape
+
+  # Verify inkscape actually runs (Homebrew wrapper can point to a stale .app path)
+  if ! inkscape --version >/dev/null 2>&1; then
+    echo "Inkscape is installed but broken — reinstalling..."
+    brew reinstall --cask inkscape
+    if ! inkscape --version >/dev/null 2>&1; then
+      echo "ERROR: inkscape still broken after reinstall" >&2
+      exit 1
+    fi
+  fi
+
   need_cmd scons
 
   ensure_source
@@ -829,6 +919,7 @@ main() {
   relocate_dependencies
   write_python_wrappers
   build_gaffer
+  fixup_gaffer_install_names
   write_launcher
   smoke_test
 

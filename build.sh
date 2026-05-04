@@ -18,7 +18,7 @@ TAG="${TAG:-1.6.14.2}"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_DIR="$ROOT_DIR/release-$TAG"
 BUILD_DIR="$ROOT_DIR/build-$TAG"
-LAUNCHER="$ROOT_DIR/gaffer-launcher"
+GAFFER="$BUILD_DIR/bin/gaffer"
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -827,16 +827,6 @@ WRAPPER
   chmod +x "$BUILD_DIR/bin/python" "$BUILD_DIR/bin/python3"
 }
 
-write_launcher() {
-  cat > "$LAUNCHER" <<EOF
-#!/bin/bash
-set -e
-script_dir="\$(cd "\$(dirname "\${BASH_SOURCE[0]}")" && pwd)"
-exec "\$script_dir/build-$TAG/bin/gaffer" "\$@"
-EOF
-  chmod +x "$LAUNCHER"
-}
-
 # ── 6. Build ────────────────────────────────────────────────────────
 
 build_gaffer() {
@@ -883,7 +873,7 @@ fixup_gaffer_install_names() {
 
 smoke_test() {
   step "Smoke test"
-  "$LAUNCHER" env python -c 'import Gaffer, GafferCycles; print("OK:", Gaffer.About.versionString())'
+  "$GAFFER" env python -c 'import Gaffer, GafferCycles; print("OK:", Gaffer.About.versionString())'
 }
 
 # ── main ─────────────────────────────────────────────────────────────
@@ -920,12 +910,11 @@ main() {
   write_python_wrappers
   build_gaffer
   fixup_gaffer_install_names
-  write_launcher
   smoke_test
 
   echo ""
   echo "Build complete. Launch Gaffer with:"
-  echo "  ./gaffer-launcher"
+  echo "  ./build-$TAG/bin/gaffer"
 }
 
 main "$@"

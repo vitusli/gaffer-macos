@@ -7,7 +7,12 @@ This repo contains a self-contained build script that downloads Gaffer 1.6.14.2 
 applies patches to fix macOS-specific issues, downloads pre-built dependencies, and
 compiles everything with SCons.
 
-## Quick start
+## Pre-built binary
+
+A ready-to-use build for Apple Silicon is available on the
+[Releases page](https://github.com/vitusli/gaffer-macos/releases/latest).
+
+## Build from source
 
 ```
 git clone https://github.com/vitusli/gaffer-macos.git
@@ -78,7 +83,7 @@ downgrade GLSL shaders from `#version 330 compatibility` to `#version 120` with
 gaffer-macos/
   build.sh        # Main build script with all patches
   Makefile         # Convenience targets
-  .gitignore       # Ignores release-*/, build-*/, gaffer-launcher
+  .gitignore       # Ignores release-*/, build-*/
 ```
 
 After building:
@@ -86,7 +91,6 @@ After building:
 ```
   release-1.6.14.2/   # Patched Gaffer source (kept for incremental rebuilds)
   build-1.6.14.2/     # Build output + dependencies (the Gaffer installation)
-  gaffer-launcher     # Shell wrapper to launch Gaffer
 ```
 
 ## License

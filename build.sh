@@ -871,6 +871,32 @@ fixup_gaffer_install_names() {
 
 # ── 7. Smoke test ───────────────────────────────────────────────────
 
+# ── 6c. Patch Menu.py: show shortcut labels in Qt 6 menus ──────────
+
+patch_menu_shortcut_labels() {
+  step "Patching Menu.py for shortcut labels"
+  python3 - "$BUILD_DIR" <<'PY'
+import pathlib, sys
+
+menu = pathlib.Path(sys.argv[1]) / "python/GafferUI/Menu.py"
+text = menu.read_text()
+marker = "qtAction.setShortcutContext( QtCore.Qt.WidgetShortcut )"
+patch = (
+    '\t\t\t# Qt 6 no longer displays shortcut labels for WidgetShortcut\n'
+    '\t\t\t# actions in menus. Append the label manually.\n'
+    '\t\t\tqtAction.setText( qtAction.text() + "\\t" + shortCut.split( "," )[0].strip() )'
+)
+if marker in text and patch not in text:
+    text = text.replace(marker, marker + "\n" + patch)
+    menu.write_text(text)
+    print("  Patched.")
+else:
+    print("  Already patched or marker not found, skipping.")
+PY
+}
+
+# ── 8. Smoke test ───────────────────────────────────────────────────
+
 smoke_test() {
   step "Smoke test"
   "$GAFFER" env python -c 'import Gaffer, GafferCycles; print("OK:", Gaffer.About.versionString())'
@@ -910,6 +936,7 @@ main() {
   write_python_wrappers
   build_gaffer
   fixup_gaffer_install_names
+  patch_menu_shortcut_labels
   smoke_test
 
   echo ""

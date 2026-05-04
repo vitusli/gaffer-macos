@@ -1,7 +1,7 @@
 # gaffer-macos
 
 
-Build [Gaffer](https://gafferhq.org) with Cycles rendering on macOS Apple Silicon (M-series).
+Build [Gaffer](https://gafferhq.org) with Cycles rendering on macOS Apple Silicon.
 
 This repo contains a self-contained build script that downloads Gaffer 1.6.14.2 source,
 applies patches to fix macOS-specific issues, downloads pre-built dependencies, and

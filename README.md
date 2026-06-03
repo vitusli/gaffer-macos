@@ -3,7 +3,7 @@
 
 Build [Gaffer](https://gafferhq.org) with Cycles rendering on macOS Apple Silicon.
 
-This repo contains a self-contained build script that downloads Gaffer 1.6.14.2 source,
+This repo contains a self-contained build script that downloads Gaffer 1.6.19.1 source,
 applies patches to fix macOS-specific issues, downloads pre-built dependencies, and
 compiles everything with SCons.
 
@@ -42,17 +42,17 @@ The build script will install `scons` and `inkscape` via Homebrew if not present
 ## Known limitations
 
 - CPU rendering only
-- No OSL
+- The Cycles viewer defaults to SVM on macOS; OSL can be selected manually in newer Gaffer builds
 - OpenGL 2.1
 
 ## What the patches fix
 
-### Cycles OSL/LLVM crash (SIGTRAP)
+### Cycles viewer SVM default
 
-OSL 1.14.5 bundles LLVM 15.0.7 which crashes on ARM64 macOS in the legacy pass
-manager (`EXC_BREAKPOINT` in `llvm::PMDataManager::addLowerLevelRequiredPass`).
-Gaffer is patched to default to Cycles' built-in SVM shading system on macOS
-instead of OSL.
+Older Gaffer builds could crash in OSL/LLVM on ARM64 macOS. Gaffer is patched to
+default the interactive viewer to Cycles' built-in SVM shading system on macOS.
+Gaffer 1.6.17.0 and newer include macOS OSL fixes, so the renderer itself keeps
+OSL available for manual selection.
 
 ### OpenGL viewport crash (SIGSEGV)
 
@@ -71,11 +71,18 @@ downgrade GLSL shaders from `#version 330 compatibility` to `#version 120` with
 - **DiffuseBsdf fallback** -- empty Cycles shader graphs crash the SVM compiler;
   a DiffuseBsdf node is inserted as fallback.
 - **Expression engine** -- two OSL expressions in `cyclesViewerSettings.gfr` are
-  changed to Python expressions (OSL is unavailable on macOS).
+  changed to Python expressions.
 - **Dependency path relocation** -- pre-built dependencies ship with hardcoded
   `/Users/admin/build/...` paths; `install_name_tool` rewrites them.
-- **Clang warning suppression** -- `-Wno-error=cast-function-type-mismatch` added
-  for newer Apple Clang versions.
+- **Build-time RPATH repair** -- Python extension modules and Gaffer dylibs are
+  repaired during a one-time SCons retry if the export phase cannot load them.
+- **macOS 15+/Tahoe cursor crash workaround** -- an AppKit cursor swizzle is
+  loaded from bundled Python startup to avoid ImageIO using Gaffer's bundled
+  libpng through flat namespace lookup.
+- **Cycles viewer restart on shading-system changes** -- switching between SVM
+  and OSL recreates the Cycles viewer renderer so the new mode takes effect.
+- **Clang warning suppression** -- `-Wno-error=cast-function-type-mismatch` and
+  `-Wno-unknown-warning-option` added for newer Apple Clang versions.
 
 ## Project structure
 
@@ -89,9 +96,15 @@ gaffer-macos/
 After building:
 
 ```
-  release-1.6.14.2/   # Patched Gaffer source (kept for incremental rebuilds)
-  build-1.6.14.2/     # Build output + dependencies (the Gaffer installation)
+  release-1.6.19.1/   # Patched Gaffer source (kept for incremental rebuilds)
+  build-1.6.19.1/     # Build output + dependencies (the Gaffer installation)
 ```
+
+## Community
+
+Work like this depends on help from Gaffer's friendly community on Discord. Their
+shared testing, build notes, and troubleshooting make these macOS builds possible.
+Join the community here: https://discord.gg/sEm8dDw
 
 ## License
 

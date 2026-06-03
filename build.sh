@@ -2,19 +2,19 @@
 # ─────────────────────────────────────────────────────────────────────
 # build.sh -- Build Gaffer with Cycles for macOS Apple Silicon
 #
-# Downloads Gaffer source, applies patches to fix Cycles rendering
-# (OSL/LLVM crash, GL viewport crash), downloads pre-built
-# dependencies, and compiles everything with scons.
+# Downloads Gaffer source, applies macOS-specific patches for Cycles,
+# viewport rendering and dependency relocation, downloads pre-built
+# dependencies, and compiles everything with SCons.
 #
 # Usage:
-#   bash build.sh            # builds Gaffer 1.6.14.2
-#   TAG=1.6.14.2 bash build.sh
+#   bash build.sh            # builds Gaffer 1.6.19.1
+#   TAG=1.6.19.1 bash build.sh
 #
 # Requirements: Xcode CLI tools, Homebrew, ~10 GB disk, ~30 min.
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-TAG="${TAG:-1.6.14.2}"
+TAG="${TAG:-1.6.19.1}"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_DIR="$ROOT_DIR/release-$TAG"
 BUILD_DIR="$ROOT_DIR/build-$TAG"
@@ -86,12 +86,52 @@ relocate_dependencies() {
 import os, subprocess, sys
 
 root = sys.argv[1]
-old = "/Users/admin/build/gafferDependencies-10.0.0-macos"
 patched = 0
+
+def relocated_path(path):
+    if not path.startswith("/"):
+        return path
+    if path.startswith(root + "/"):
+        return path
+
+    stripped = path.rstrip("/")
+    for directory in ("/lib", "/Frameworks", "/python"):
+        if stripped.endswith(directory):
+            prefix = stripped[: -len(directory)]
+            if "/build/" in prefix or "gafferDependencies" in prefix or "cortex-" in prefix:
+                return root + directory + ("/" if path.endswith("/") else "")
+
+    for marker in ("/lib/", "/Frameworks/", "/python/"):
+        if marker in path:
+            prefix, suffix = path.split(marker, 1)
+            if "/build/" in prefix or "gafferDependencies" in prefix or "cortex-" in prefix:
+                return root + marker + suffix
+
+    return path
+
+def is_macho_candidate(path):
+    name = os.path.basename(path)
+    if name.startswith("."):
+        return False
+
+    ext = os.path.splitext(name)[1]
+    if ext in { ".dylib", ".so", ".bundle" }:
+        return True
+
+    normalized = path.replace(os.sep, "/")
+    if "/bin/" in normalized and not ext:
+        return True
+
+    if ".framework/Versions/" in normalized and not ext:
+        return True
+
+    return False
 
 for dirpath, _, filenames in os.walk(root):
     for name in filenames:
         path = os.path.join(dirpath, name)
+        if not is_macho_candidate(path):
+            continue
         try:
             info = subprocess.check_output(
                 ["file", "-b", path], text=True, stderr=subprocess.DEVNULL
@@ -108,9 +148,10 @@ for dirpath, _, filenames in os.walk(root):
         except subprocess.CalledProcessError:
             ids = []
         for ident in ids:
-            if old in ident:
+            new_ident = relocated_path(ident)
+            if new_ident != ident:
                 subprocess.check_call(
-                    ["install_name_tool", "-id", ident.replace(old, root), path]
+                    ["install_name_tool", "-id", new_ident, path]
                 )
                 changed = True
         try:
@@ -121,9 +162,10 @@ for dirpath, _, filenames in os.walk(root):
             libs = []
         for line in libs:
             dep = line.strip().split(" (compatibility version", 1)[0]
-            if old in dep:
+            new_dep = relocated_path(dep)
+            if new_dep != dep:
                 subprocess.check_call(
-                    ["install_name_tool", "-change", dep, dep.replace(old, root), path]
+                    ["install_name_tool", "-change", dep, new_dep, path]
                 )
                 changed = True
         # Fix LC_RPATH entries
@@ -135,9 +177,11 @@ for dirpath, _, filenames in os.walk(root):
             rpath_out = ""
         for line in rpath_out.splitlines():
             line = line.strip()
-            if line.startswith("path ") and old in line:
+            if line.startswith("path "):
                 old_rpath = line.split("path ", 1)[1].split(" (offset", 1)[0].strip()
-                new_rpath = old_rpath.replace(old, root)
+                new_rpath = relocated_path(old_rpath)
+                if new_rpath == old_rpath:
+                    continue
                 try:
                     subprocess.check_call(
                         ["install_name_tool", "-rpath", old_rpath, new_rpath, path]
@@ -163,10 +207,10 @@ PY
 #   a) SConstruct     -- suppress new clang warnings-as-errors
 #   b) TweakPlug.cpp  -- fmt::format type fix
 #   c) bin/gaffer     -- macOS Python.framework launcher
-#   d) Renderer.cpp   -- default Cycles to SVM (OSL/LLVM 15 crashes)
+#   d) Renderer.cpp   -- fallback fixes while keeping explicit OSL usable
 #   e) ShaderNetworkAlgo.cpp -- DiffuseBsdf fallback for empty shaders
 #   f) cyclesViewerSettings.gfr -- SVM default + Python expressions
-#   g) shaderView.py  -- SVM on macOS
+#   g) shaderView.py  -- keep OSL shader previews in OSL mode
 #   h) OutputBuffer.cpp -- GL_TEXTURE_1D, GLSL 1.20, null checks
 #   i) macosCPUFallback.py -- CPU-only device list
 
@@ -180,10 +224,16 @@ root = pathlib.Path(sys.argv[1])
 # ── a) SConstruct: suppress warnings-as-errors on newer clang ──
 sconstruct = root / "SConstruct"
 text = sconstruct.read_text()
-if '-Wno-error=cast-function-type-mismatch' not in text:
+if '-Wno-error=cast-function-type-mismatch' in text and '-Wno-unknown-warning-option' not in text:
+    text = text.replace(
+        '"-Wno-error=cast-function-type-mismatch" ]',
+        '"-Wno-error=cast-function-type-mismatch", "-Wno-unknown-warning-option" ]',
+        1,
+    )
+elif '-Wno-error=cast-function-type-mismatch' not in text:
     text = re.sub(
         r'(env\.Append\( CXXFLAGS = \[ "-DBOOST_NO_CXX98_FUNCTION_BASE", "-D_HAS_AUTO_PTR_ETC=0" \] \)\n)',
-        r'\1\t\tenv.Append( CXXFLAGS = [ "-Wno-error=deprecated-declarations", "-Wno-error=cast-function-type-mismatch" ] )\n',
+        r'\1\t\tenv.Append( CXXFLAGS = [ "-Wno-error=deprecated-declarations", "-Wno-error=cast-function-type-mismatch", "-Wno-unknown-warning-option" ] )\n',
         text, count=1,
     )
 sconstruct.write_text(text)
@@ -204,10 +254,12 @@ print("  [a2] SConstruct rpath")
 # ── b) TweakPlug.cpp: fmt::format enum fix ──
 tweak = root / "src/Gaffer/TweakPlug.cpp"
 text = tweak.read_text()
-old = '                throw IECore::Exception( fmt::format( "Not a valid tweak mode: {}.", mode ) );'
-new = '                throw IECore::Exception( fmt::format( "Not a valid tweak mode: {}.", TweakPlug::modeToString( mode ) ) );'
-if old in text:
-    text = text.replace(old, new)
+text = re.sub(
+    r'throw\s+IECore::Exception\(\s*fmt::format\(\s*"Not a valid tweak mode: \{\}\.",\s*mode\s*\)\s*\);',
+    'throw IECore::Exception( fmt::format( "Not a valid tweak mode: {}.", TweakPlug::modeToString( mode ) ) );',
+    text,
+    count=1,
+)
 tweak.write_text(text)
 print("  [b] TweakPlug.cpp")
 
@@ -232,12 +284,12 @@ if 'gafferPythonHome="$rootDir/lib/Python.framework/Versions/Current"' not in te
         'exec python "$rootDir/bin/_gaffer.py" "$@"',
         'exec "$gafferPython" "$rootDir/bin/_gaffer.py" "$@"',
     )
-# Ensure DYLD_LIBRARY_PATH is set for macOS (LD_LIBRARY_PATH doesn't work)
-if 'DYLD_LIBRARY_PATH' not in text:
-    text = text.replace(
-        'prependToPath "$rootDir/lib" DYLD_FRAMEWORK_PATH\nfi',
-        'prependToPath "$rootDir/lib" DYLD_FRAMEWORK_PATH\n\tprependToPath "$rootDir/lib" DYLD_LIBRARY_PATH\nfi',
-    )
+# Keep DYLD_LIBRARY_PATH unset on macOS. It pollutes flat namespace lookups and
+# can make ImageIO pick up Gaffer's bundled libpng on Sequoia/Tahoe.
+text = text.replace(
+    '\tprependToPath "$rootDir/lib" DYLD_FRAMEWORK_PATH\n\tprependToPath "$rootDir/lib" DYLD_LIBRARY_PATH\nfi',
+    '\tprependToPath "$rootDir/lib" DYLD_FRAMEWORK_PATH\nfi',
+)
 launcher.write_text(text)
 print("  [c] bin/gaffer")
 
@@ -254,9 +306,7 @@ startup.write_text(
 )
 print("  [i] macosCPUFallback.py")
 
-# ── d) Renderer.cpp: default Cycles to SVM on macOS ──
-# OSL's bundled LLVM 15 legacy pass manager crashes on ARM64 macOS
-# (EXC_BREAKPOINT in addLowerLevelRequiredPass).
+# ── d) Renderer.cpp: fallback fixes while keeping explicit OSL usable ──
 
 renderer = root / "src/GafferCycles/IECoreCyclesPreview/Renderer.cpp"
 rtxt = renderer.read_text()
@@ -286,13 +336,9 @@ new_surf = (
 if old_surf in rtxt:
     rtxt = rtxt.replace(old_surf, new_surf, 1)
 
-# d.2) Default session params to SVM on macOS
+# d.2) Leave renderer defaults as OSL. Viewer settings opt into SVM on macOS,
+# but explicit OSL renders must remain possible.
 rtxt = rtxt.replace(
-    'ccl::SessionParams defaultSessionParams( IECoreScenePreview::Renderer::RenderType renderType )\n'
-    '{\n'
-    '\tccl::SessionParams params;\n'
-    '\tparams.device = firstCPUDevice();\n'
-    '\tparams.shadingsystem = ccl::SHADINGSYSTEM_OSL;\n',
     'ccl::SessionParams defaultSessionParams( IECoreScenePreview::Renderer::RenderType renderType )\n'
     '{\n'
     '\tccl::SessionParams params;\n'
@@ -303,15 +349,15 @@ rtxt = rtxt.replace(
     '#else\n'
     '\tparams.shadingsystem = ccl::SHADINGSYSTEM_OSL;\n'
     '#endif\n',
+    'ccl::SessionParams defaultSessionParams( IECoreScenePreview::Renderer::RenderType renderType )\n'
+    '{\n'
+    '\tccl::SessionParams params;\n'
+    '\tparams.device = firstCPUDevice();\n'
+    '\tparams.shadingsystem = ccl::SHADINGSYSTEM_OSL;\n',
     1
 )
 
-# d.3) Default scene params to SVM on macOS
 rtxt = rtxt.replace(
-    'ccl::SceneParams defaultSceneParams( IECoreScenePreview::Renderer::RenderType renderType )\n'
-    '{\n'
-    '\tccl::SceneParams params;\n'
-    '\tparams.shadingsystem = ccl::SHADINGSYSTEM_OSL;\n',
     'ccl::SceneParams defaultSceneParams( IECoreScenePreview::Renderer::RenderType renderType )\n'
     '{\n'
     '\tccl::SceneParams params;\n'
@@ -320,13 +366,15 @@ rtxt = rtxt.replace(
     '#else\n'
     '\tparams.shadingsystem = ccl::SHADINGSYSTEM_OSL;\n'
     '#endif\n',
+    'ccl::SceneParams defaultSceneParams( IECoreScenePreview::Renderer::RenderType renderType )\n'
+    '{\n'
+    '\tccl::SceneParams params;\n'
+    '\tparams.shadingsystem = ccl::SHADINGSYSTEM_OSL;\n',
     1
 )
 
-# d.4) Add g_defaultShadingSystem constant
+# d.3) Add g_defaultShadingSystem constant
 rtxt = rtxt.replace(
-    'IECore::InternedString g_shadingsystemSVM( "SVM" );\n\n'
-    'ccl::ShadingSystem nameToShadingSystemEnum(',
     'IECore::InternedString g_shadingsystemSVM( "SVM" );\n\n'
     '#ifdef __APPLE__\n'
     'const char *g_defaultShadingSystem = "SVM";\n'
@@ -334,10 +382,21 @@ rtxt = rtxt.replace(
     'const char *g_defaultShadingSystem = "OSL";\n'
     '#endif\n\n'
     'ccl::ShadingSystem nameToShadingSystemEnum(',
+    'IECore::InternedString g_shadingsystemSVM( "SVM" );\n\n'
+    'const char *g_defaultShadingSystem = "OSL";\n\n'
+    'ccl::ShadingSystem nameToShadingSystemEnum(',
+    1
+)
+rtxt = rtxt.replace(
+    'IECore::InternedString g_shadingsystemSVM( "SVM" );\n\n'
+    'ccl::ShadingSystem nameToShadingSystemEnum(',
+    'IECore::InternedString g_shadingsystemSVM( "SVM" );\n\n'
+    'const char *g_defaultShadingSystem = "OSL";\n\n'
+    'ccl::ShadingSystem nameToShadingSystemEnum(',
     1
 )
 
-# d.5) Use g_defaultShadingSystem in option lookups
+# d.4) Use g_defaultShadingSystem in option lookups
 rtxt = rtxt.replace(
     'params.shadingsystem = nameToShadingSystemEnum( optionValue<string>( g_shadingsystemOptionName, "OSL", modified ) );',
     'params.shadingsystem = nameToShadingSystemEnum( optionValue<string>( g_shadingsystemOptionName, g_defaultShadingSystem, modified ) );',
@@ -382,20 +441,58 @@ vtxt = vtxt.replace(
     """__children["ViewerSettings"]["Expression3"]["__engine"].setValue( 'python' )\n__children["ViewerSettings"]["Expression3"]["__expression"].setValue( 'parent["__out"]["p0"] = not parent["__in"]["p0"]' )\n__children["ViewerSettings"]["Expression5"]["__engine"].setValue( 'python' )\n__children["ViewerSettings"]["Expression5"]["__expression"].setValue( 'parent["__out"]["p0"] = parent["__in"]["p0"]' )""",
     1
 )
+vtxt = vtxt.replace(
+    """Gaffer.Metadata.registerValue( __children["ViewerSettings"]["shadingSystem"], 'plugValueWidget:type', 'GafferUI.PresetsPlugValueWidget' )""",
+    """Gaffer.Metadata.registerValue( __children["ViewerSettings"]["shadingSystem"], 'plugValueWidget:type', 'GafferCyclesUI.CyclesOptionsUI.ViewerShadingSystemPlugValueWidget' )""",
+    1
+)
 vset.write_text(vtxt)
 print("  [f] cyclesViewerSettings.gfr")
 
-# ── g) shaderView.py: SVM on macOS ──
+# ── f2) CyclesOptionsUI.py: restart viewer when shading system changes ──
+cycles_ui = root / "python/GafferCyclesUI/CyclesOptionsUI.py"
+ctxt = cycles_ui.read_text()
+if "class ViewerShadingSystemPlugValueWidget" not in ctxt:
+    insert = r'''
+class ViewerShadingSystemPlugValueWidget( GafferUI.PresetsPlugValueWidget ) :
+
+	def __init__( self, plugs, **kw ) :
+
+		GafferUI.PresetsPlugValueWidget.__init__( self, plugs, **kw )
+
+		self.getPlug().node().plugSetSignal().connect( Gaffer.WeakMethod( self.__plugSet ) )
+
+	def __plugSet( self, plug ) :
+
+		if plug != self.getPlug() :
+			return
+
+		# Cycles can't switch shading systems after the session has started.
+		# Force the SceneView to create a fresh Cycles renderer.
+		if plug.node()["renderer"]["name"].getValue() == "Cycles" :
+			plug.node()["renderer"]["name"].setValue( "OpenGL" )
+			plug.node()["renderer"]["name"].setValue( "Cycles" )
+
+'''
+    ctxt = ctxt.replace(
+        "\n# Used by `startup/gui/cyclesViewerSettings.gfr`.\nclass ViewerDevicePlugValueWidget",
+        "\n# Used by `startup/gui/cyclesViewerSettings.gfr`.\n" + insert + "class ViewerDevicePlugValueWidget",
+        1,
+    )
+cycles_ui.write_text(ctxt)
+print("  [f2] CyclesOptionsUI.py")
+
+# ── g) shaderView.py: keep OSL shader previews in OSL mode ──
 sview = root / "startup/gui/shaderView.py"
 svtxt = sview.read_text()
 svtxt = svtxt.replace(
-    '\t\t\t# Less issues when mixing around OSL shaders\n'
-    '\t\t\tresult["shadingSystem"]["enabled"].setValue( True )\n'
-    '\t\t\tresult["shadingSystem"]["value"].setValue( "OSL" )\n',
     '\t\t\timport sys\n'
     '\t\t\t_shadingSys = "SVM" if sys.platform == "darwin" else "OSL"\n'
     '\t\t\tresult["shadingSystem"]["enabled"].setValue( True )\n'
     '\t\t\tresult["shadingSystem"]["value"].setValue( _shadingSys )\n',
+    '\t\t\t# Less issues when mixing around OSL shaders\n'
+    '\t\t\tresult["shadingSystem"]["enabled"].setValue( True )\n'
+    '\t\t\tresult["shadingSystem"]["value"].setValue( "OSL" )\n',
     1
 )
 sview.write_text(svtxt)
@@ -831,6 +928,17 @@ WRAPPER
 
 build_gaffer() {
   step "Building Gaffer"
+  if run_scons_build; then
+    return
+  fi
+
+  echo ""
+  echo "Initial SCons build failed. Applying Mach-O rpath/install-name fixes and retrying once..."
+  fixup_gaffer_install_names
+  run_scons_build
+}
+
+run_scons_build() {
   ( cd "$RELEASE_DIR" && \
     scons -j "$(sysctl -n hw.ncpu)" build \
       BUILD_DIR="$BUILD_DIR" )
@@ -839,10 +947,23 @@ build_gaffer() {
 # ── 6b. Fix install names of freshly-built Gaffer libs ──────────────
 
 fixup_gaffer_install_names() {
-  step "Fixing install names of built libraries"
+  step "Fixing rpaths/install names of built libraries"
   local bd="$BUILD_DIR"
 
-  # Fix dylibs in lib/ — change id from "lib/libXxx.dylib" to "@rpath/libXxx.dylib"
+  if [ -d "$bd/python" ]; then
+    find "$bd/python" -name '*.so' -print0 | while IFS= read -r -d '' f; do
+      install_name_tool -add_rpath "@loader_path/../../lib" "$f" 2>/dev/null || true
+      install_name_tool -add_rpath "@loader_path/../../../lib" "$f" 2>/dev/null || true
+    done
+  fi
+
+  if [ -d "$bd/lib" ]; then
+    find "$bd/lib" -maxdepth 1 -name '*.dylib' -print0 | while IFS= read -r -d '' f; do
+      install_name_tool -add_rpath "@loader_path/../lib" "$f" 2>/dev/null || true
+    done
+  fi
+
+  # Fix dylibs in lib/ - change id from "lib/libXxx.dylib" to "@rpath/libXxx.dylib"
   for f in "$bd"/lib/*.dylib; do
     [ -f "$f" ] || continue
     local cur_id
@@ -855,8 +976,10 @@ fixup_gaffer_install_names() {
   done
 
   # Fix all .so and .dylib that reference "lib/libXxx.dylib" (bare relative)
-  for f in "$bd"/lib/*.dylib "$bd"/python/*/*.so; do
-    [ -f "$f" ] || continue
+  {
+    [ -d "$bd/lib" ] && find "$bd/lib" -maxdepth 1 -name '*.dylib' -print0
+    [ -d "$bd/python" ] && find "$bd/python" -name '*.so' -print0
+  } | while IFS= read -r -d '' f; do
     otool -L "$f" 2>/dev/null | awk 'NR>1{print $1}' | while read -r dep; do
       if [[ "$dep" == lib/lib*.dylib ]]; then
         local base
@@ -893,6 +1016,82 @@ if marker in text and patch not in text:
 else:
     print("  Already patched or marker not found, skipping.")
 PY
+}
+
+# ── 6d. Install macOS 15+/Tahoe cursor crash workaround ─────────────
+
+install_cursor_crash_workaround() {
+  step "Installing macOS cursor crash workaround"
+
+  if [[ "$(uname)" != "Darwin" ]]; then
+    echo "  Not macOS, skipping."
+    return
+  fi
+
+  local product_version major_version
+  product_version="$(sw_vers -productVersion 2>/dev/null || echo 0)"
+  major_version="${product_version%%.*}"
+  if [[ "$major_version" =~ ^[0-9]+$ ]] && (( major_version < 15 )); then
+    echo "  macOS $product_version does not need this workaround, skipping."
+    return
+  fi
+
+  command -v clang >/dev/null 2>&1 || {
+    echo "ERROR: Missing required command: clang" >&2
+    exit 1
+  }
+
+  local source="$BUILD_DIR/fix_cursor_crash.m"
+  local dylib="$BUILD_DIR/lib/fix_cursor_crash.dylib"
+  cat > "$source" <<'OBJC'
+#import <objc/runtime.h>
+#import <AppKit/AppKit.h>
+#import <Foundation/Foundation.h>
+
+static void noop(id self, SEL _cmd) { }
+
+__attribute__((constructor))
+static void swizzle(void)
+{
+    Method m1 = class_getInstanceMethod([NSCursor class], @selector(set));
+    if (m1) method_setImplementation(m1, (IMP)noop);
+
+    Method m2 = class_getInstanceMethod([NSCursor class], @selector(_reallySet));
+    if (m2) method_setImplementation(m2, (IMP)noop);
+}
+OBJC
+
+  clang -dynamiclib -framework AppKit -framework Foundation -o "$dylib" "$source"
+
+  local site_packages
+  site_packages="$(find "$BUILD_DIR/lib/Python.framework/Versions/Current/lib" -maxdepth 2 -type d -name site-packages -print -quit 2>/dev/null || true)"
+  if [ -z "$site_packages" ]; then
+    echo "ERROR: Could not find bundled Python site-packages directory" >&2
+    exit 1
+  fi
+
+  cat > "$site_packages/_fix_cursor_crash.py" <<'PY'
+import ctypes
+import os
+import pathlib
+import sys
+
+if sys.platform == "darwin":
+    root = os.environ.get("GAFFER_ROOT")
+    if not root:
+        try:
+            root = pathlib.Path(__file__).resolve().parents[7]
+        except IndexError:
+            root = None
+
+    if root:
+        lib = pathlib.Path(root) / "lib" / "fix_cursor_crash.dylib"
+        if lib.exists():
+            ctypes.CDLL(str(lib))
+PY
+
+  printf '%s\n' 'import _fix_cursor_crash' > "$site_packages/fix_cursor_crash.pth"
+  echo "  Installed for macOS $product_version."
 }
 
 # ── 8. Smoke test ───────────────────────────────────────────────────
@@ -937,6 +1136,7 @@ main() {
   build_gaffer
   fixup_gaffer_install_names
   patch_menu_shortcut_labels
+  install_cursor_crash_workaround
   smoke_test
 
   echo ""

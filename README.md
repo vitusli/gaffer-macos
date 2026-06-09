@@ -43,6 +43,7 @@ The build script will install `scons` and `inkscape` via Homebrew if not present
 
 - CPU rendering only
 - The Cycles viewer defaults to SVM on macOS; OSL can be selected manually in newer Gaffer builds
+- **OSL freezes on ARM64 macOS** -- OSL uses LLVM 15 whose legacy pass manager hangs/crashes on Apple Silicon during JIT compilation (`OSLShaderManager::device_update_specific`). This is why the viewer defaults to SVM. Forcing OSL would require rebuilding against LLVM 16+.
 - OpenGL 2.1
 
 ## What the patches fix

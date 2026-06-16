@@ -3,3 +3,4 @@ build-*/
 gaffer-*/
 *.tar.gz
 .sconsign.dblite
+/.DS_Store

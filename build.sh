@@ -1094,7 +1094,15 @@ PY
   echo "  Installed for macOS $product_version."
 }
 
-# ── 8. Smoke test ───────────────────────────────────────────────────
+# ── 8. Remove Gatekeeper quarantine attributes ──────────────────────
+
+remove_quarantine_attributes() {
+  step "Removing Gatekeeper quarantine attributes"
+  xattr -rd com.apple.quarantine "$BUILD_DIR" 2>/dev/null || true
+  echo "  Done."
+}
+
+# ── 9. Smoke test ───────────────────────────────────────────────────
 
 smoke_test() {
   step "Smoke test"
@@ -1137,6 +1145,7 @@ main() {
   fixup_gaffer_install_names
   patch_menu_shortcut_labels
   install_cursor_crash_workaround
+  remove_quarantine_attributes
   smoke_test
 
   echo ""

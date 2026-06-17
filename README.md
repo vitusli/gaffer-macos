@@ -10,7 +10,13 @@ compiles everything with SCons.
 ## Pre-built binary
 
 A ready-to-use build for Apple Silicon is available on the
-[Releases page](https://github.com/vitusli/gaffer-macos/releases/latest).
+[Releases page](https://github.com/vitusli/gaffer-macos/releases/latest). You need to remove quarantine attributes on the downloaded build to avoid "Not Opened". Below are instructions for the pre-built binary.
+
+## Known limitations
+
+- CPU rendering only
+- No OSL
+- OpenGL 2.1
 
 ## Build from source
 
@@ -39,14 +45,46 @@ The build script will install `scons` and `inkscape` via Homebrew if not present
 | `make smoke` | Quick import test |
 | `make clean` | Remove source + build directories |
 
-## Known limitations
+## Project structure
 
-- CPU rendering only
-- The Cycles viewer defaults to SVM on macOS; OSL can be selected manually in newer Gaffer builds
-- **OSL freezes on ARM64 macOS** -- OSL uses LLVM 15 whose legacy pass manager hangs/crashes on Apple Silicon during JIT compilation (`OSLShaderManager::device_update_specific`). This is why the viewer defaults to SVM. Forcing OSL would require rebuilding against LLVM 16+.
-- OpenGL 2.1
+```
+gaffer-macos/
+  build.sh        # Main build script with all patches
+  Makefile         # Convenience targets
+  .gitignore       # Ignores release-*/, build-*/
+```
 
-## What the patches fix
+After building:
+
+```
+  release-1.xxx/   # Patched Gaffer source (kept for incremental rebuilds)
+  build-1.xxx/     # Build output + dependencies (the Gaffer installation)
+```
+
+## Gatekeeper note (downloaded builds)
+
+If a downloaded/extracted build triggers many macOS "Not Opened" dialogs for
+`.dylib` files, remove quarantine attributes from both files and symlinks:
+
+
+```bash
+BUILD_DIR="$HOME/Downloads/build-1.6.19.1"
+chmod -R u+w "$BUILD_DIR"
+xattr -dr com.apple.quarantine "$BUILD_DIR"
+xattr -drs com.apple.quarantine "$BUILD_DIR"
+```
+
+## Community
+
+Work like this depends on help from Gaffer's friendly community on Discord. Their
+shared testing, build notes, and troubleshooting make these macOS builds possible.
+Join the community here: https://discord.gg/sEm8dDw
+
+## Other fixes (details)
+
+<details>
+<summary>Show patch details</summary>
+
 
 ### Cycles viewer SVM default
 
@@ -62,8 +100,6 @@ uses `GL_TEXTURE_BUFFER` and `glTexBuffer` (GL 3.1+) which resolve to NULL funct
 pointers. The patches replace these with `GL_TEXTURE_1D` / `glTexImage1D` and
 downgrade GLSL shaders from `#version 330 compatibility` to `#version 120` with
 `GL_EXT_gpu_shader4`.
-
-### Other fixes
 
 - **Python.framework launcher** -- macOS bundles Python as a framework; the
   `bin/gaffer` launcher is patched to set `PYTHONHOME` correctly.
@@ -85,48 +121,7 @@ downgrade GLSL shaders from `#version 330 compatibility` to `#version 120` with
 - **Clang warning suppression** -- `-Wno-error=cast-function-type-mismatch` and
   `-Wno-unknown-warning-option` added for newer Apple Clang versions.
 
-## Project structure
-
-```
-gaffer-macos/
-  build.sh        # Main build script with all patches
-  Makefile         # Convenience targets
-  .gitignore       # Ignores release-*/, build-*/
-```
-
-After building:
-
-```
-  release-1.6.19.1/   # Patched Gaffer source (kept for incremental rebuilds)
-  build-1.6.19.1/     # Build output + dependencies (the Gaffer installation)
-```
-
-## Gatekeeper note (downloaded builds)
-
-If a downloaded/extracted build triggers many macOS "Not Opened" dialogs for
-`.dylib` files, remove quarantine attributes from both files and symlinks:
-
-```bash
-BUILD_DIR="./build-<TAG>"
-chmod -R u+w "$BUILD_DIR"
-xattr -dr com.apple.quarantine "$BUILD_DIR"
-xattr -drs com.apple.quarantine "$BUILD_DIR"
-```
-
-Example:
-
-```bash
-BUILD_DIR="/Users/<you>/Downloads/build-1.6.19.1"
-chmod -R u+w "$BUILD_DIR"
-xattr -dr com.apple.quarantine "$BUILD_DIR"
-xattr -drs com.apple.quarantine "$BUILD_DIR"
-```
-
-## Community
-
-Work like this depends on help from Gaffer's friendly community on Discord. Their
-shared testing, build notes, and troubleshooting make these macOS builds possible.
-Join the community here: https://discord.gg/sEm8dDw
+</details>
 
 ## License
 

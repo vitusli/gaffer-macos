@@ -1098,7 +1098,11 @@ PY
 
 remove_quarantine_attributes() {
   step "Removing Gatekeeper quarantine attributes"
-  xattr -rd com.apple.quarantine "$BUILD_DIR" 2>/dev/null || true
+  # Some bundled dependency files are read-only and some quarantine flags
+  # can sit on symlinks themselves, so we handle both cases.
+  chmod -R u+w "$BUILD_DIR" 2>/dev/null || true
+  xattr -dr com.apple.quarantine "$BUILD_DIR" 2>/dev/null || true
+  xattr -drs com.apple.quarantine "$BUILD_DIR" 2>/dev/null || true
   echo "  Done."
 }
 

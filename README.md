@@ -101,6 +101,27 @@ After building:
   build-1.6.19.1/     # Build output + dependencies (the Gaffer installation)
 ```
 
+## Gatekeeper note (downloaded builds)
+
+If a downloaded/extracted build triggers many macOS "Not Opened" dialogs for
+`.dylib` files, remove quarantine attributes from both files and symlinks:
+
+```bash
+BUILD_DIR="./build-<TAG>"
+chmod -R u+w "$BUILD_DIR"
+xattr -dr com.apple.quarantine "$BUILD_DIR"
+xattr -drs com.apple.quarantine "$BUILD_DIR"
+```
+
+Example:
+
+```bash
+BUILD_DIR="/Users/<you>/Downloads/build-1.6.19.1"
+chmod -R u+w "$BUILD_DIR"
+xattr -dr com.apple.quarantine "$BUILD_DIR"
+xattr -drs com.apple.quarantine "$BUILD_DIR"
+```
+
 ## Community
 
 Work like this depends on help from Gaffer's friendly community on Discord. Their

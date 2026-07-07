@@ -212,7 +212,7 @@ PY
 #   f) cyclesViewerSettings.gfr -- SVM default + Python expressions
 #   g) shaderView.py  -- keep OSL shader previews in OSL mode
 #   h) OutputBuffer.cpp -- GL_TEXTURE_1D, GLSL 1.20, null checks
-#   i) macosCPUFallback.py -- CPU-only device list
+#   i) macosDeviceSelection.py -- default to all devices, optional CPU fallback
 
 apply_source_patches() {
   step "Patching source"
@@ -293,18 +293,24 @@ text = text.replace(
 launcher.write_text(text)
 print("  [c] bin/gaffer")
 
-# ── i) macosCPUFallback.py: CPU-only Cycles device list ──
-startup = root / "startup/GafferCycles/macosCPUFallback.py"
+# ── i) macosDeviceSelection.py: keep Metal enabled, optional CPU fallback ──
+startup = root / "startup/GafferCycles/macosDeviceSelection.py"
 startup.write_text(
+    'import os\n'
     'import sys\n\n'
-    'if sys.platform == "darwin" :\n\n'
+    'if sys.platform == "darwin" and os.environ.get( "GAFFER_CYCLES_FORCE_CPU", "0" ) in { "1", "true", "TRUE", "yes", "YES" } :\n\n'
     '\timport IECore\n'
     '\timport GafferCycles\n\n'
     '\tcpuDevice = GafferCycles.devices.get( "CPU" )\n'
     '\tif cpuDevice is not None :\n'
     '\t\tGafferCycles.devices = IECore.CompoundData( { "CPU" : cpuDevice } )\n'
 )
-print("  [i] macosCPUFallback.py")
+
+legacyStartup = root / "startup/GafferCycles/macosCPUFallback.py"
+if legacyStartup.exists() :
+    legacyStartup.unlink()
+
+print("  [i] macosDeviceSelection.py")
 
 # ── d) Renderer.cpp: fallback fixes while keeping explicit OSL usable ──
 
@@ -924,6 +930,46 @@ WRAPPER
   chmod +x "$BUILD_DIR/bin/python" "$BUILD_DIR/bin/python3"
 }
 
+# ── 5b. Patch Cycles Metal runtime kernel compatibility ─────────────
+
+patch_cycles_metal_compat() {
+  step "Patching Cycles Metal compat.h"
+  python3 - "$BUILD_DIR" <<'PY'
+import pathlib, sys
+
+build_dir = pathlib.Path(sys.argv[1])
+targets = [
+    build_dir / "cycles/source/kernel/device/metal/compat.h",
+    build_dir / "cycles/include/kernel/device/metal/compat.h",
+]
+
+marker = "#ifdef __METAL_GLOBAL_BUILTINS__"
+patch = (
+    "#if defined( __METAL_GLOBAL_BUILTINS__ )\n"
+    "#  undef __METAL_GLOBAL_BUILTINS__\n"
+    "#endif\n\n"
+    "#ifdef __METAL_GLOBAL_BUILTINS__"
+)
+
+patched = 0
+for target in targets:
+    if not target.exists():
+        continue
+    text = target.read_text()
+    if patch in text:
+        continue
+    if marker not in text:
+        print(f"  Marker not found in {target}")
+        continue
+    target.write_text(text.replace(marker, patch, 1))
+    print(f"  Patched {target}")
+    patched += 1
+
+if patched == 0:
+    print("  Already patched or no matching files found.")
+PY
+}
+
 # ── 6. Build ────────────────────────────────────────────────────────
 
 build_gaffer() {
@@ -1096,6 +1142,15 @@ PY
 
 # ── 8. Remove Gatekeeper quarantine attributes ──────────────────────
 
+remove_legacy_startup_files() {
+  local legacy="$BUILD_DIR/startup/GafferCycles/macosCPUFallback.py"
+  if [ -f "$legacy" ]; then
+    rm -f "$legacy"
+  fi
+}
+
+# ── 8. Remove Gatekeeper quarantine attributes ──────────────────────
+
 remove_quarantine_attributes() {
   step "Removing Gatekeeper quarantine attributes"
   # Some bundled dependency files are read-only and some quarantine flags
@@ -1145,9 +1200,11 @@ main() {
   download_dependencies
   relocate_dependencies
   write_python_wrappers
+  patch_cycles_metal_compat
   build_gaffer
   fixup_gaffer_install_names
   patch_menu_shortcut_labels
+  remove_legacy_startup_files
   install_cursor_crash_workaround
   remove_quarantine_attributes
   smoke_test

@@ -14,8 +14,8 @@ A ready-to-use build for Apple Silicon is available on the
 
 ## Known limitations
 
-- CPU rendering only
-- No OSL
+- Cycles OSL is unstable on Apple Silicon in this build path; viewer defaults to SVM
+- No OSL shader compile support in Metal mode
 - OpenGL 2.1
 
 ## Build from source
@@ -36,6 +36,16 @@ make run
 
 The build script will install `scons` and `inkscape` via Homebrew if not present.
 
+## Cycles device selection on macOS
+
+Metal GPU rendering is enabled by default when a compatible Apple GPU is available.
+
+To force CPU-only mode for debugging or compatibility:
+
+```bash
+GAFFER_CYCLES_FORCE_CPU=1 ./build-1.6.19.1/bin/gaffer
+```
+
 ## Make targets
 
 | Target | Description |
@@ -44,6 +54,21 @@ The build script will install `scons` and `inkscape` via Homebrew if not present
 | `make run` | Launch Gaffer |
 | `make smoke` | Quick import test |
 | `make clean` | Remove source + build directories |
+
+### Optional GPU visibility smoke test
+
+This repository includes a deterministic Cycles test that verifies geometry and
+material are visible on both CPU and METAL devices:
+
+```bash
+./build-1.6.19.1/bin/gaffer env python smoke_gpu_visibility.py
+```
+
+Expected result includes:
+
+- `CPU session: CPU ...`
+- `METAL session: METAL_...`
+- `OK: Cycles METAL renders visible geometry/material`
 
 ## Project structure
 

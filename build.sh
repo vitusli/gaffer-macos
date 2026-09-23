@@ -7,14 +7,14 @@
 # dependencies, and compiles everything with SCons.
 #
 # Usage:
-#   bash build.sh            # builds Gaffer 1.6.19.1
+#   bash build.sh            # builds Gaffer 1.7.2.0
 #   TAG=1.6.19.1 bash build.sh
 #
 # Requirements: Xcode CLI tools, Homebrew, ~10 GB disk, ~30 min.
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-TAG="${TAG:-1.6.19.1}"
+TAG="${TAG:-1.7.2.0}"
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_DIR="$ROOT_DIR/release-$TAG"
 BUILD_DIR="$ROOT_DIR/build-$TAG"
@@ -89,8 +89,14 @@ root = sys.argv[1]
 patched = 0
 
 def relocated_path(path):
-    if not path.startswith("/"):
+    if path.startswith("@"):
         return path
+    if not path.startswith("/"):
+        # Bare/relative references (e.g. "libz.1.dylib", "lib/libIECore.dylib")
+        # break dlopen once files move away from the original build tree.
+        # Cortex 10.7.1.3's platform25 dependency bundle ships several of
+        # these (libz in particular) with no "@rpath/" prefix at all.
+        return "@rpath/" + os.path.basename(path)
     if path.startswith(root + "/"):
         return path
 
@@ -222,19 +228,35 @@ import pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 
 # ── a) SConstruct: suppress warnings-as-errors on newer clang ──
+#
+# clang 21 (Xcode 27) adds two warnings that Gaffer's -Werror turns fatal:
+#   -Wno-unknown-warning-option                    -- future-proofs against
+#                                                      clang version skew
+#   -Wno-error=implicit-const-int-float-conversion -- new in clang 21, hits
+#                                                      PrimitiveVariableType.cpp
+#                                                      (half<->int at numeric_limits
+#                                                      boundaries; new file in 1.7.x)
 sconstruct = root / "SConstruct"
 text = sconstruct.read_text()
+extra_flags = '"-Wno-unknown-warning-option", "-Wno-error=implicit-const-int-float-conversion"'
 if '-Wno-error=cast-function-type-mismatch' in text and '-Wno-unknown-warning-option' not in text:
     text = text.replace(
         '"-Wno-error=cast-function-type-mismatch" ]',
-        '"-Wno-error=cast-function-type-mismatch", "-Wno-unknown-warning-option" ]',
+        '"-Wno-error=cast-function-type-mismatch", ' + extra_flags + ' ]',
         1,
     )
 elif '-Wno-error=cast-function-type-mismatch' not in text:
     text = re.sub(
         r'(env\.Append\( CXXFLAGS = \[ "-DBOOST_NO_CXX98_FUNCTION_BASE", "-D_HAS_AUTO_PTR_ETC=0" \] \)\n)',
-        r'\1\t\tenv.Append( CXXFLAGS = [ "-Wno-error=deprecated-declarations", "-Wno-error=cast-function-type-mismatch", "-Wno-unknown-warning-option" ] )\n',
+        r'\1\t\tenv.Append( CXXFLAGS = [ "-Wno-error=deprecated-declarations", "-Wno-error=cast-function-type-mismatch", ' + extra_flags + r' ] )\n',
         text, count=1,
+    )
+elif '-Wno-error=implicit-const-int-float-conversion' not in text:
+    # Already patched by an older run of this script (before this flag existed).
+    text = text.replace(
+        '"-Wno-error=cast-function-type-mismatch", "-Wno-unknown-warning-option" ]',
+        '"-Wno-error=cast-function-type-mismatch", ' + extra_flags + ' ]',
+        1,
     )
 sconstruct.write_text(text)
 print("  [a] SConstruct")
@@ -412,25 +434,29 @@ renderer.write_text(rtxt)
 print("  [d] Renderer.cpp")
 
 # ── e) ShaderNetworkAlgo.cpp: DiffuseBsdf fallback ──
+# convertWalk()'s 4th argument was renamed/retyped from `shaderManager`
+# (1.6.x) to `scene` (1.7.x+) upstream -- match either.
 snalgo = root / "src/GafferCycles/IECoreCyclesPreview/ShaderNetworkAlgo.cpp"
 stxt = snalgo.read_text()
-old_sna = (
-    '\t\tccl::ShaderNode *node = convertWalk( toConvert->getOutput(), toConvert.get(), namePrefix, shaderManager, graph.get(), converted );\n'
-    '\n'
-    '\t\tif( node )\n'
-)
-new_sna = (
-    '\t\tccl::ShaderNode *node = convertWalk( toConvert->getOutput(), toConvert.get(), namePrefix, shaderManager, graph.get(), converted );\n'
-    '\n'
-    '\t\tif( !node && name == "surface" )\n'
-    '\t\t{\n'
-    '\t\t\tnode = graph->create_node<ccl::DiffuseBsdfNode>();\n'
-    '\t\t}\n'
-    '\n'
-    '\t\tif( node )\n'
-)
-if old_sna in stxt:
-    stxt = stxt.replace(old_sna, new_sna, 1)
+for arg_name in ( "shaderManager", "scene" ):
+    old_sna = (
+        f'\t\tccl::ShaderNode *node = convertWalk( toConvert->getOutput(), toConvert.get(), namePrefix, {arg_name}, graph.get(), converted );\n'
+        '\n'
+        '\t\tif( node )\n'
+    )
+    new_sna = (
+        f'\t\tccl::ShaderNode *node = convertWalk( toConvert->getOutput(), toConvert.get(), namePrefix, {arg_name}, graph.get(), converted );\n'
+        '\n'
+        '\t\tif( !node && name == "surface" )\n'
+        '\t\t{\n'
+        '\t\t\tnode = graph->create_node<ccl::DiffuseBsdfNode>();\n'
+        '\t\t}\n'
+        '\n'
+        '\t\tif( node )\n'
+    )
+    if old_sna in stxt:
+        stxt = stxt.replace(old_sna, new_sna, 1)
+        break
 snalgo.write_text(stxt)
 print("  [e] ShaderNetworkAlgo.cpp")
 

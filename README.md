@@ -3,9 +3,10 @@
 
 Build [Gaffer](https://gafferhq.org) with Cycles rendering on macOS Apple Silicon.
 
-This repo contains a self-contained build script that downloads Gaffer 1.6.19.1 source,
+This repo contains a self-contained build script that downloads Gaffer source,
 applies patches to fix macOS-specific issues, downloads pre-built dependencies, and
-compiles everything with SCons.
+compiles everything with SCons. It defaults to the latest tested version,
+**Gaffer 1.7.2.0**, and also builds 1.6.19.1 via `TAG=1.6.19.1`.
 
 ## Pre-built binary
 
@@ -23,8 +24,15 @@ A ready-to-use build for Apple Silicon is available on the
 ```
 git clone https://github.com/vitusli/gaffer-macos.git
 cd gaffer-macos
-make build   # ~30 min first time
+make build   # ~30 min first time, builds Gaffer 1.7.2.0
 make run
+```
+
+To build the older 1.6.19.1 line instead:
+
+```
+make build TAG=1.6.19.1
+make run TAG=1.6.19.1
 ```
 
 ## Requirements
@@ -43,7 +51,7 @@ Metal GPU rendering is enabled by default when a compatible Apple GPU is availab
 To force CPU-only mode for debugging or compatibility:
 
 ```bash
-GAFFER_CYCLES_FORCE_CPU=1 ./build-1.6.19.1/bin/gaffer
+GAFFER_CYCLES_FORCE_CPU=1 ./build-1.7.2.0/bin/gaffer
 ```
 
 ## Make targets
@@ -61,7 +69,7 @@ This repository includes a deterministic Cycles test that verifies geometry and
 material are visible on both CPU and METAL devices:
 
 ```bash
-./build-1.6.19.1/bin/gaffer env python smoke_gpu_visibility.py
+./build-1.7.2.0/bin/gaffer env python smoke_gpu_visibility.py
 ```
 
 Expected result includes:
@@ -93,7 +101,7 @@ If a downloaded/extracted build triggers many macOS "Not Opened" dialogs for
 
 
 ```bash
-BUILD_DIR="$HOME/Downloads/build-1.6.19.1"
+BUILD_DIR="$HOME/Downloads/build-1.7.2.0"
 chmod -R u+w "$BUILD_DIR"
 xattr -dr com.apple.quarantine "$BUILD_DIR"
 xattr -drs com.apple.quarantine "$BUILD_DIR"
@@ -145,6 +153,27 @@ downgrade GLSL shaders from `#version 330 compatibility` to `#version 120` with
   and OSL recreates the Cycles viewer renderer so the new mode takes effect.
 - **Clang warning suppression** -- `-Wno-error=cast-function-type-mismatch` and
   `-Wno-unknown-warning-option` added for newer Apple Clang versions.
+
+### 1.7.x-specific notes
+
+Several 1.6.x macOS patches were upstreamed into Gaffer 1.7.x directly (the
+Python.framework launcher, `DYLD_LIBRARY_PATH` removal, and OSL-everywhere
+`Renderer.cpp` defaults), so the patch script quietly no-ops those steps on
+1.7.x source. What's new for 1.7.x:
+
+- **Bare `libz` install names** -- the `platform25` Cortex 10.7.1.3 dependency
+  bundle ships several dylibs (`libfreetype`, `libOpenColorIO`, `libOpenImageIO`,
+  `libopenvdb`, ...) with a bare `libz.1.dylib` reference (no `@rpath/` prefix),
+  which fails `dlopen` once Gaffer's own Python runs mid-build. The dependency
+  relocation pass now rewrites any bare (non-absolute, non-`@`) install name to
+  `@rpath/<basename>`, not just absolute build-machine paths.
+- **clang 21 warning** -- `-Wno-error=implicit-const-int-float-conversion` is
+  added alongside the existing suppressions; it's new in Xcode 27's clang and
+  fires in the new (1.7.x) `PrimitiveVariableType.cpp` on half/int conversions
+  at `numeric_limits` boundaries.
+- **`convertWalk` signature change** -- `ShaderNetworkAlgo.cpp`'s DiffuseBsdf
+  fallback patch matches both the 1.6.x (`shaderManager`) and 1.7.x (`scene`)
+  parameter name for the function it patches.
 
 </details>
 

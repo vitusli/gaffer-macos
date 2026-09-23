@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-TAG ?= 1.6.19.1
+TAG ?= 1.7.2.0
 ROOT_DIR := $(abspath .)
 BUILD_DIR := $(ROOT_DIR)/build-$(TAG)
 GAFFER := $(BUILD_DIR)/bin/gaffer

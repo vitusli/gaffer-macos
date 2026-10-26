@@ -8,12 +8,14 @@ doesn't ship macOS builds). Everything lives in `build.sh`; `Makefile` wraps it.
 Prefer the prebuilt release, it takes a minute instead of ~30:
 
 ```bash
-gh release download -R vitusli/gaffer-macos -p '*.tar.gz' -D ~/Downloads   # latest release
 mkdir -p ~/gaffer
-tar xzf ~/Downloads/gaffer-<version>-macos-arm64.tar.gz -C ~/gaffer
-xattr -dr com.apple.quarantine ~/gaffer/build-<version>   # unsigned build, required
+curl -L https://github.com/vitusli/gaffer-macos/releases/download/v<version>/gaffer-<version>-macos-arm64.tar.gz | tar xz -C ~/gaffer
 ~/gaffer/build-<version>/bin/gaffer
 ```
+
+curl doesn't set the quarantine attribute, so no `xattr` needed. Files
+downloaded through a browser do need
+`xattr -dr com.apple.quarantine ~/gaffer/build-<version>` (unsigned build).
 
 Building from source instead: `make build && make run` (needs Xcode CLT,
 Homebrew, ~10 GB). Tell the user about the Metal/SVM note in the README.
@@ -32,7 +34,7 @@ Goal: the latest Gaffer release is always available here for macOS, tested.
 3. Validate (see below). Don't release if anything fails that you can't
    explain.
 4. Bump the default version in `build.sh` (`DEFAULT_TAG`), `Makefile` (`TAG`)
-   and the paths in `README.md`. Commit.
+   and the version in the README install commands. Commit.
 5. `make package TAG=<version>`, then test the tarball the way a user gets it:
    add a quarantine attribute (`xattr -w com.apple.quarantine "0083;0;Safari;" <file>`),
    extract into a fresh dir, follow the README install steps, run `make smoke`-style

@@ -54,22 +54,11 @@ make build   # ~30 min
 make run
 ```
 
-Other versions: `make build TAG=<version>`, or `TAG=latest` for the newest
-GafferHQ release. Only the default version is tested, but every patch checks
-that it applied, so a version that doesn't work fails with the name of the
-broken patch instead of building something broken.
+`make build TAG=latest` builds the newest GafferHQ release. Untested versions
+may fail, but the script tells you which patch broke.
 
-## What gets patched
-
-All in [build.sh](build.sh):
-
-- Clang warning flags so newer Xcode versions compile Gaffer
-- Fixes for install names / rpaths in the prebuilt dependencies
-- Cycles viewer overlay ported to the OpenGL 2.1 context macOS gives Gaffer
-- Fallback shader so unshaded objects don't crash Cycles
-- Viewer defaults to SVM instead of OSL so Metal works there
-- Shortcut labels in menus (Qt 6 hides them on macOS)
-- The cursor crash workaround mentioned above
+Using a coding agent (Claude Code, Codex, ...)? Point it at this repo and ask
+it to install or build Gaffer for you; [AGENTS.md](AGENTS.md) tells it how.
 
 Gaffer's [Discord](https://discord.gg/sEm8dDw) helped a lot with this.
 

@@ -7,14 +7,32 @@
 # dependencies, and compiles everything with SCons.
 #
 # Usage:
-#   bash build.sh            # builds Gaffer 1.7.2.0
+#   bash build.sh            # builds Gaffer 1.7.5.0 (latest tested)
+#   TAG=latest bash build.sh # resolves the newest GafferHQ release
 #   TAG=1.6.19.1 bash build.sh
 #
 # Requirements: Xcode CLI tools, Homebrew, ~10 GB disk, ~30 min.
 # ─────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-TAG="${TAG:-1.7.2.0}"
+# Latest Gaffer release this script has been built and smoke-tested against.
+DEFAULT_TAG="1.7.5.0"
+
+TAG="${TAG:-$DEFAULT_TAG}"
+if [ "$TAG" = "latest" ]; then
+  echo "Resolving latest GafferHQ release..."
+  TAG="$(
+    curl -fsSL "https://api.github.com/repos/GafferHQ/gaffer/releases/latest" |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])'
+  )"
+  echo "  -> $TAG"
+  if [ "$TAG" != "$DEFAULT_TAG" ]; then
+    echo "  NOTE: $TAG is newer than the tested $DEFAULT_TAG. Patches are"
+    echo "        verified at apply time, so this will fail loudly rather"
+    echo "        than silently produce a broken build."
+  fi
+fi
+
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RELEASE_DIR="$ROOT_DIR/release-$TAG"
 BUILD_DIR="$ROOT_DIR/build-$TAG"
@@ -227,6 +245,21 @@ import pathlib, re, sys
 
 root = pathlib.Path(sys.argv[1])
 
+# Every patch below is a string replacement against a specific upstream
+# revision, so a Gaffer release that moves the code out from under us would
+# otherwise leave a silently unpatched (crashing) build. Each patch therefore
+# asserts its own end state: either our replacement landed, or upstream
+# already does the equivalent thing. Anything else aborts the build.
+problems = []
+
+def expect( label, condition, detail ) :
+
+	if condition :
+		print( f"  [{label}] ok" )
+	else :
+		print( f"  [{label}] FAILED -- {detail}" )
+		problems.append( label )
+
 # ── a) SConstruct: suppress warnings-as-errors on newer clang ──
 #
 # clang 21 (Xcode 27) adds two warnings that Gaffer's -Werror turns fatal:
@@ -259,7 +292,11 @@ elif '-Wno-error=implicit-const-int-float-conversion' not in text:
         1,
     )
 sconstruct.write_text(text)
-print("  [a] SConstruct")
+expect(
+	"a SConstruct clang flags",
+	'-Wno-error=implicit-const-int-float-conversion' in text,
+	"could not add clang warning suppressions; SConstruct's CXXFLAGS block moved"
+)
 
 # ── a2) SConstruct: add @loader_path rpath for macOS shared libs ──
 text = sconstruct.read_text()
@@ -271,7 +308,11 @@ if '@loader_path/../lib' not in text:
         '\telse :',
     )
     sconstruct.write_text(text)
-print("  [a2] SConstruct rpath")
+expect(
+	"a2 SConstruct rpath",
+	'@loader_path/../lib' in sconstruct.read_text(),
+	"could not add @loader_path rpaths; the macOS GAFFER_PLATFORM branch moved"
+)
 
 # ── b) TweakPlug.cpp: fmt::format enum fix ──
 tweak = root / "src/Gaffer/TweakPlug.cpp"
@@ -283,16 +324,25 @@ text = re.sub(
     count=1,
 )
 tweak.write_text(text)
-print("  [b] TweakPlug.cpp")
+expect(
+	"b TweakPlug.cpp",
+	'TweakPlug::modeToString( mode )' in text or 'Not a valid tweak mode' not in text,
+	"fmt::format( mode ) is still unformattable; the throw statement moved"
+)
 
 # ── c) bin/gaffer: macOS Python.framework launcher ──
+#
+# 1.7.x upstream already exports PYTHONHOME from the bundled framework and
+# execs `$rootDir/bin/python` (the wrapper we write in write_python_wrappers),
+# so the 1.6.x launcher rewrite below only runs on older sources.
 launcher = root / "bin/gaffer"
 text = launcher.read_text()
-if 'gafferPythonHome="$rootDir/lib/Python.framework/Versions/Current"' not in text:
+pythonHome = 'PYTHONHOME="$rootDir/lib/Python.framework/Versions/Current"'
+if pythonHome not in text:
     text = re.sub(
         r'# Unset PYTHONHOME to make sure our internal Python build is used in\n# preference to anything in the external environment\.\nunset PYTHONHOME\n',
         'gafferPythonHome="$rootDir/lib/Python.framework/Versions/Current"\n'
-        'gafferPython="$gafferPythonHome/bin/python3.11"\n\n'
+        'gafferPython="$rootDir/bin/python"\n\n'
         '# Force our bundled Python framework so macOS can locate its standard library\n'
         '# and extension modules reliably.\n'
         'export PYTHONHOME="$gafferPythonHome"\n',
@@ -313,7 +363,16 @@ text = text.replace(
     '\tprependToPath "$rootDir/lib" DYLD_FRAMEWORK_PATH\nfi',
 )
 launcher.write_text(text)
-print("  [c] bin/gaffer")
+expect(
+	"c bin/gaffer PYTHONHOME",
+	pythonHome in text,
+	"launcher does not point PYTHONHOME at the bundled Python.framework"
+)
+expect(
+	"c bin/gaffer DYLD_LIBRARY_PATH",
+	"DYLD_LIBRARY_PATH" not in text,
+	"launcher still sets DYLD_LIBRARY_PATH, which breaks ImageIO on Sequoia/Tahoe"
+)
 
 # ── i) macosDeviceSelection.py: keep Metal enabled, optional CPU fallback ──
 startup = root / "startup/GafferCycles/macosDeviceSelection.py"
@@ -332,37 +391,72 @@ legacyStartup = root / "startup/GafferCycles/macosCPUFallback.py"
 if legacyStartup.exists() :
     legacyStartup.unlink()
 
-print("  [i] macosDeviceSelection.py")
+expect(
+	"i macosDeviceSelection.py",
+	"GAFFER_CYCLES_FORCE_CPU" in startup.read_text(),
+	"could not write the Cycles device selection startup file"
+)
 
 # ── d) Renderer.cpp: fallback fixes while keeping explicit OSL usable ──
 
+# d.1) Null-out "defaultsurface" shader name
+#
+# The default IECoreScene::Shader constructor uses the name "defaultsurface",
+# which is not a valid Cycles shader. Treat it as "no shader assigned" so the
+# facing-ratio fallback is used instead, avoiding an empty ShaderGraph that
+# crashes Cycles' SVM compiler.
+#
+# This lived in Renderer.cpp up to 1.7.2.0 and moved to Attributes.cpp in
+# 1.7.3.0, at a different indentation level, so find it by content.
+defaultSurfaceMarker = 'getName() == "defaultsurface"'
+defaultSurfaceOk = False
+for candidate in (
+    root / "src/GafferCycles/IECoreCyclesPreview/Attributes.cpp",
+    root / "src/GafferCycles/IECoreCyclesPreview/Renderer.cpp",
+):
+    if not candidate.exists():
+        continue
+    ctext = candidate.read_text()
+    if defaultSurfaceMarker in ctext:
+        defaultSurfaceOk = True  # already applied by a previous run
+        break
+    match = re.search(
+        r'^([\t ]*)(surfaceShaderAttribute = surfaceShaderAttribute \? surfaceShaderAttribute : '
+        r'attribute<IECoreScene::ShaderNetwork>\( g_surfaceShaderAttributeName, attributes \);\n)'
+        r'([\t ]*if\( !surfaceShaderAttribute && !volumeShaderAttribute \)\n)',
+        ctext, re.MULTILINE
+    )
+    if not match:
+        continue
+    indent = match.group(1)
+    guard = "".join(
+        indent + line + "\n" for line in (
+            'if(',
+            '\tsurfaceShaderAttribute &&',
+            '\tsurfaceShaderAttribute->getOutput().shader.string().size() &&',
+            '\tsurfaceShaderAttribute->getShader( surfaceShaderAttribute->getOutput().shader )'
+                '->getName() == "defaultsurface"',
+            ')',
+            '{',
+            '\tsurfaceShaderAttribute = nullptr;',
+            '}',
+        )
+    )
+    candidate.write_text(
+        ctext.replace(match.group(0), indent + match.group(2) + guard + match.group(3), 1)
+    )
+    defaultSurfaceOk = defaultSurfaceMarker in candidate.read_text()
+    break
+
+expect(
+    "d1 defaultsurface fallback",
+    defaultSurfaceOk,
+    "could not find the surface shader attribute lookup in Attributes.cpp or "
+    "Renderer.cpp; without this guard Cycles crashes on unshaded geometry"
+)
+
 renderer = root / "src/GafferCycles/IECoreCyclesPreview/Renderer.cpp"
 rtxt = renderer.read_text()
-
-# d.1) Null-out "defaultsurface" shader name
-old_surf = (
-    '\t\t\tsurfaceShaderAttribute = surfaceShaderAttribute ? surfaceShaderAttribute : attribute<IECoreScene::ShaderNetwork>( g_surfaceShaderAttributeName, attributes );\n'
-    '\t\t\tif( !surfaceShaderAttribute && !volumeShaderAttribute )\n'
-)
-new_surf = (
-    '\t\t\tsurfaceShaderAttribute = surfaceShaderAttribute ? surfaceShaderAttribute : attribute<IECoreScene::ShaderNetwork>( g_surfaceShaderAttributeName, attributes );\n'
-    '\t\t\t// The default IECoreScene::Shader constructor uses the name\n'
-    '\t\t\t// "defaultsurface", which is not a valid Cycles shader. Treat\n'
-    '\t\t\t// it as "no shader assigned" so the facing-ratio fallback is\n'
-    '\t\t\t// used instead, avoiding an empty ShaderGraph that crashes\n'
-    "\t\t\t// Cycles' SVM compiler.\n"
-    '\t\t\tif(\n'
-    '\t\t\t\tsurfaceShaderAttribute &&\n'
-    '\t\t\t\tsurfaceShaderAttribute->getOutput().shader.string().size() &&\n'
-    '\t\t\t\tsurfaceShaderAttribute->getShader( surfaceShaderAttribute->getOutput().shader )->getName() == "defaultsurface"\n'
-    '\t\t\t)\n'
-    '\t\t\t{\n'
-    '\t\t\t\tsurfaceShaderAttribute = nullptr;\n'
-    '\t\t\t}\n'
-    '\t\t\tif( !surfaceShaderAttribute && !volumeShaderAttribute )\n'
-)
-if old_surf in rtxt:
-    rtxt = rtxt.replace(old_surf, new_surf, 1)
 
 # d.2) Leave renderer defaults as OSL. Viewer settings opt into SVM on macOS,
 # but explicit OSL renders must remain possible.
@@ -431,7 +525,22 @@ rtxt = rtxt.replace(
 )
 
 renderer.write_text(rtxt)
-print("  [d] Renderer.cpp")
+expect(
+    "d Renderer.cpp OSL default",
+    'const char *g_defaultShadingSystem = "OSL";' in rtxt
+        and '#ifdef __APPLE__\nconst char *g_defaultShadingSystem' not in rtxt,
+    "could not force the renderer's default shading system to OSL"
+)
+expect(
+    "d Renderer.cpp option default",
+    'optionValue<string>( g_shadingsystemOptionName, g_defaultShadingSystem, modified )' in rtxt,
+    "the cycles:shadingsystem option still hard-codes its default"
+)
+expect(
+    "d Renderer.cpp session params",
+    'params.shadingsystem = ccl::SHADINGSYSTEM_SVM;\n#else' not in rtxt,
+    "default session/scene params still force SVM on __APPLE__"
+)
 
 # ── e) ShaderNetworkAlgo.cpp: DiffuseBsdf fallback ──
 # convertWalk()'s 4th argument was renamed/retyped from `shaderManager`
@@ -458,7 +567,11 @@ for arg_name in ( "shaderManager", "scene" ):
         stxt = stxt.replace(old_sna, new_sna, 1)
         break
 snalgo.write_text(stxt)
-print("  [e] ShaderNetworkAlgo.cpp")
+expect(
+    "e ShaderNetworkAlgo.cpp",
+    "ccl::DiffuseBsdfNode" in stxt,
+    "could not add the DiffuseBsdf fallback; convertWalk()'s signature changed again"
+)
 
 # ── f) cyclesViewerSettings.gfr: SVM default + Python expressions ──
 vset = root / "startup/gui/cyclesViewerSettings.gfr"
@@ -479,7 +592,13 @@ vtxt = vtxt.replace(
     1
 )
 vset.write_text(vtxt)
-print("  [f] cyclesViewerSettings.gfr")
+expect(
+    "f cyclesViewerSettings.gfr",
+    "shadingSystem\", defaultValue = 'SVM'" in vtxt
+        and "ViewerShadingSystemPlugValueWidget" in vtxt
+        and "'OSL'" not in vtxt.split( "Expression5" )[0],
+    "the viewer's shading system defaults/expressions could not be switched to SVM/python"
+)
 
 # ── f2) CyclesOptionsUI.py: restart viewer when shading system changes ──
 cycles_ui = root / "python/GafferCyclesUI/CyclesOptionsUI.py"
@@ -512,7 +631,11 @@ class ViewerShadingSystemPlugValueWidget( GafferUI.PresetsPlugValueWidget ) :
         1,
     )
 cycles_ui.write_text(ctxt)
-print("  [f2] CyclesOptionsUI.py")
+expect(
+    "f2 CyclesOptionsUI.py",
+    "class ViewerShadingSystemPlugValueWidget" in ctxt,
+    "could not install the widget that restarts the viewer on a shading system change"
+)
 
 # ── g) shaderView.py: keep OSL shader previews in OSL mode ──
 sview = root / "startup/gui/shaderView.py"
@@ -528,7 +651,11 @@ svtxt = svtxt.replace(
     1
 )
 sview.write_text(svtxt)
-print("  [g] shaderView.py")
+expect(
+    "g shaderView.py",
+    "_shadingSys" not in svtxt and 'result["shadingSystem"]["value"].setValue( "OSL" )' in svtxt,
+    "shader previews still force SVM on macOS"
+)
 
 # ── h) OutputBuffer.cpp: macOS GL viewport fix ──
 # macOS GL 2.1 context doesn't have GL_TEXTURE_BUFFER / glTexBuffer.
@@ -935,7 +1062,19 @@ otxt = otxt.replace(
 )
 
 ob.write_text(otxt)
-print("  [h] OutputBuffer.cpp")
+expect(
+    "h OutputBuffer.cpp",
+    "GL_TEXTURE_1D" in otxt and "#else // !__APPLE__" in otxt
+        and "selectionSizeParam" in otxt,
+    "could not apply the GL 2.1 viewport fixes; the viewer would render black"
+)
+
+if problems:
+    print("")
+    print("ERROR: %d patch(es) did not apply to Gaffer %s." % (len(problems), root.name.replace("release-", "")))
+    print("Upstream moved the code these patches target: " + ", ".join(problems) + ".")
+    print("Build aborted rather than producing a broken Gaffer.")
+    sys.exit(1)
 
 print("All patches applied.")
 PY
@@ -944,13 +1083,33 @@ PY
 # ── 5. Write helper scripts ─────────────────────────────────────────
 
 write_python_wrappers() {
+  step "Python wrappers"
+
+  # The bundled interpreter's version moves with the VFX platform the
+  # dependency bundle was built for (3.11 on platform25), so discover it
+  # rather than hard-coding it.
+  local framework_bin="$BUILD_DIR/lib/Python.framework/Versions/Current/bin"
+  local python_exe=""
+  local candidate
+  for candidate in "$framework_bin"/python3.[0-9] "$framework_bin"/python3.[0-9][0-9]; do
+    if [ -x "$candidate" ]; then
+      python_exe="$(basename "$candidate")"
+    fi
+  done
+  if [ -z "$python_exe" ]; then
+    echo "ERROR: No python3.x interpreter found in $framework_bin" >&2
+    exit 1
+  fi
+  echo "  Bundled interpreter: $python_exe"
+
+  mkdir -p "$BUILD_DIR/bin"
   rm -f "$BUILD_DIR/bin/python" "$BUILD_DIR/bin/python3"
-  cat > "$BUILD_DIR/bin/python" <<'WRAPPER'
+  cat > "$BUILD_DIR/bin/python" <<WRAPPER
 #!/bin/bash
 set -e
-rootDir="$(cd "$(dirname "$0")/.." && pwd)"
-export PYTHONHOME="$rootDir/lib/Python.framework/Versions/Current"
-exec "$rootDir/lib/Python.framework/Versions/Current/bin/python3.11" "$@"
+rootDir="\$(cd "\$(dirname "\$0")/.." && pwd)"
+export PYTHONHOME="\$rootDir/lib/Python.framework/Versions/Current"
+exec "\$rootDir/lib/Python.framework/Versions/Current/bin/$python_exe" "\$@"
 WRAPPER
   cp "$BUILD_DIR/bin/python" "$BUILD_DIR/bin/python3"
   chmod +x "$BUILD_DIR/bin/python" "$BUILD_DIR/bin/python3"

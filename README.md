@@ -6,7 +6,7 @@ Build [Gaffer](https://gafferhq.org) with Cycles rendering on macOS Apple Silico
 This repo contains a self-contained build script that downloads Gaffer source,
 applies patches to fix macOS-specific issues, downloads pre-built dependencies, and
 compiles everything with SCons. It defaults to the latest tested version,
-**Gaffer 1.7.2.0**, and also builds 1.6.19.1 via `TAG=1.6.19.1`.
+**Gaffer 1.7.5.0**, and also builds 1.6.19.1 via `TAG=1.6.19.1`.
 
 ## Pre-built binary
 
@@ -24,16 +24,23 @@ A ready-to-use build for Apple Silicon is available on the
 ```
 git clone https://github.com/vitusli/gaffer-macos.git
 cd gaffer-macos
-make build   # ~30 min first time, builds Gaffer 1.7.2.0
+make build   # ~30 min first time, builds Gaffer 1.7.5.0
 make run
 ```
 
-To build the older 1.6.19.1 line instead:
+To build a different release:
 
 ```
-make build TAG=1.6.19.1
-make run TAG=1.6.19.1
+make build TAG=1.6.19.1   # the older 1.6.x line
+make run   TAG=1.6.19.1
+
+make build TAG=latest     # whatever GafferHQ released most recently
 ```
+
+`TAG=latest` resolves the newest GafferHQ release at build time. Every patch
+checks its own result, so an untested release fails the build with the name of
+the patch that no longer applies instead of producing a Gaffer that crashes on
+first render.
 
 ## Requirements
 
@@ -46,12 +53,37 @@ The build script will install `scons` and `inkscape` via Homebrew if not present
 
 ## Cycles device selection on macOS
 
-Metal GPU rendering is enabled by default when a compatible Apple GPU is available.
+The Metal device is available to Cycles out of the box -- `GafferCycles.devices`
+lists it alongside the CPU, and batch renders can select it.
+
+**The interactive Viewer still defaults to CPU.** That is Gaffer's own default
+(`startup/gui/cyclesViewerSettings.gfr` ships `device` with a default of `CPU`),
+not something this build changes. If you want the GPU in the Viewer, pick the
+Metal entry in the Viewer's device dropdown -- otherwise you are path tracing on
+the CPU without noticing.
+
+Measured on an M4 Pro (16 GPU cores), identical scene and sample count:
+
+| `cycles:device` | wall time | GPU utilisation | CPU time |
+|---|---|---|---|
+| `METAL:00` | 1.96 s | 78-85 % | 1.97 s |
+| `CPU` | 6.29 s | ~3 % | 210 s |
+
+Device strings are patterns, not device names: `CPU`, `METAL:00` (first Metal
+device), `CPU METAL:00` (both) or `METAL:*` (all Metal devices) -- the values
+behind the dropdown's entries. Passing the name from `GafferCycles.devices`
+instead does *not* raise an error; Cycles logs
+
+```
+WARNING : CyclesRenderer : No devices matching "..." found, reverting to CPU.
+```
+
+and renders on the CPU. Worth grepping for if a GPU render seems slow.
 
 To force CPU-only mode for debugging or compatibility:
 
 ```bash
-GAFFER_CYCLES_FORCE_CPU=1 ./build-1.7.2.0/bin/gaffer
+GAFFER_CYCLES_FORCE_CPU=1 ./build-1.7.5.0/bin/gaffer
 ```
 
 ## Make targets
@@ -61,6 +93,7 @@ GAFFER_CYCLES_FORCE_CPU=1 ./build-1.7.2.0/bin/gaffer
 | `make build` | Download, patch, and build Gaffer |
 | `make run` | Launch Gaffer |
 | `make smoke` | Quick import test |
+| `make package` | Tar the build into `gaffer-<TAG>-macos-arm64.tar.gz` for a release |
 | `make clean` | Remove source + build directories |
 
 ### Optional GPU visibility smoke test
@@ -69,7 +102,7 @@ This repository includes a deterministic Cycles test that verifies geometry and
 material are visible on both CPU and METAL devices:
 
 ```bash
-./build-1.7.2.0/bin/gaffer env python smoke_gpu_visibility.py
+./build-1.7.5.0/bin/gaffer env python smoke_gpu_visibility.py
 ```
 
 Expected result includes:
@@ -101,7 +134,7 @@ If a downloaded/extracted build triggers many macOS "Not Opened" dialogs for
 
 
 ```bash
-BUILD_DIR="$HOME/Downloads/build-1.7.2.0"
+BUILD_DIR="$HOME/Downloads/build-1.7.5.0"
 chmod -R u+w "$BUILD_DIR"
 xattr -dr com.apple.quarantine "$BUILD_DIR"
 xattr -drs com.apple.quarantine "$BUILD_DIR"
@@ -174,6 +207,22 @@ Python.framework launcher, `DYLD_LIBRARY_PATH` removal, and OSL-everywhere
 - **`convertWalk` signature change** -- `ShaderNetworkAlgo.cpp`'s DiffuseBsdf
   fallback patch matches both the 1.6.x (`shaderManager`) and 1.7.x (`scene`)
   parameter name for the function it patches.
+
+### 1.7.5.0-specific notes
+
+- **Cortex 10.7.4.0** -- 1.7.5.0 pulls a newer dependency bundle than 1.7.2.0's
+  10.7.1.3. The bare-install-name fix above still applies to it.
+- **Shader assignment moved** -- the `"defaultsurface"` guard used to patch
+  `Renderer.cpp`; from 1.7.3.0 that code lives in the new
+  `IECoreCyclesPreview/Attributes.cpp` at a different indentation level. The
+  patch now locates it by content in either file instead of by exact text.
+- **Bundled interpreter discovered, not assumed** -- the `bin/python` wrapper is
+  generated from whichever `python3.x` the dependency bundle actually ships
+  (3.11 on platform25) rather than a hard-coded version.
+- **Patches verify themselves** -- each patch asserts its own end state, so a
+  patch that upstream has already applied is a silent no-op, while a patch whose
+  target has moved aborts the build and names itself. This is what makes
+  `TAG=latest` safe to offer.
 
 </details>
 

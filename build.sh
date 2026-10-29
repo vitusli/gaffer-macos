@@ -239,6 +239,7 @@ PY
 #   i) macosDeviceSelection.py -- default to all devices, optional CPU fallback
 #   j) PaintTool.cpp  -- GLSL 1.20 paint visualiser
 #   j2) DepthRender.cpp -- depth-only framebuffer completeness
+#   k) VisualiserTool.cpp -- GLSL 1.20 visualisers, CPU vertex label visibility
 
 apply_source_patches() {
   step "Patching source"
@@ -1252,6 +1253,451 @@ expect(
     "j2 DepthRender.cpp",
     "glDrawBuffer( GL_NONE )" in drtxt,
     "could not fix the depth-only framebuffer; paint strokes would not apply"
+)
+
+# ── k) VisualiserTool.cpp: GLSL 1.20 visualisers, CPU vertex label visibility ──
+# The VisualiserTool draws with GLSL 330 shaders (uniform blocks,
+# layout(location), interface blocks) and its vertex labels use a GLSL 430
+# pass that writes visibility bits with atomicOr into a shader storage
+# buffer. In the GL 2.1 context none of it compiles, so the tool draws
+# nothing. Port the 330 shaders to 1.20 (EXT_gpu_shader4 provides
+# gl_VertexID and flat varyings; instancing comes from ARB_instanced_arrays
+# and ARB_draw_instanced), with plain uniforms and attribute locations bound
+# by relinking. GL 2.1 has no storage buffers or atomics, so the vertex
+# label visibility test reads back the scene depth and tests each vertex on
+# the CPU instead.
+
+vt = root / "src/GafferSceneUI/VisualiserTool.cpp"
+vtxt = vt.read_text()
+
+VT_APPLE_CODE = r'''#ifdef __APPLE__
+
+// macOS only gives us a GL 2.1 context, which compiles GLSL 1.20 and has no
+// uniform blocks. Matrices are uploaded untransposed, so they multiply from
+// the left here.
+
+// The core GL 3.3 instancing entry points are null in a 2.1 context, but the
+// ARB extensions they came from are there.
+#undef glVertexAttribDivisor
+#define glVertexAttribDivisor glVertexAttribDivisorARB
+#undef glDrawArraysInstanced
+#define glDrawArraysInstanced glDrawArraysInstancedARB
+
+const std::string g_colorShaderVertSource120(
+	"#version 120\n"
+	"uniform mat4 o2c;\n"
+	"uniform vec3 valueMin;\n"
+	"uniform vec3 valueRange;\n"
+	"attribute vec3 ps;\n"
+	"attribute float vsx;\n"
+	"attribute float vsy;\n"
+	"attribute float vsz;\n"
+	"varying vec3 value;\n"
+	"void main()\n"
+	"{\n"
+	"   value = clamp( ( vec3( vsx, vsy, vsz ) - valueMin ) * valueRange, 0.0, 1.0 );\n"
+	"   gl_Position = o2c * vec4( ps, 1.0 );\n"
+	"}\n"
+);
+
+const std::string g_colorShaderFragSource120(
+	"#version 120\n"
+	"uniform float opacity;\n"
+	"varying vec3 value;\n"
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor = vec4( value, opacity );\n"
+	"}\n"
+);
+
+#define VECTOR_SHADER_GLSL_120_HEADER \
+	"#version 120\n" \
+	"#extension GL_EXT_gpu_shader4 : require\n" \
+	"uniform mat4 o2v;\n" \
+	"uniform mat4 n2v;\n" \
+	"uniform mat4 v2c;\n" \
+	"uniform mat4 o2c;\n" \
+	"uniform float scale;\n" \
+	"attribute vec3 ps;\n" \
+	"attribute vec3 vs;\n"
+
+const std::string g_vectorShaderVertSourcePoint120(
+	VECTOR_SHADER_GLSL_120_HEADER
+	"void main()\n"
+	"{\n"
+	"   vec3 position = ps;\n"
+	"   if( gl_VertexID == 1 )\n"
+	"   {\n"
+	"       position = vs;\n"
+	"   }\n"
+	"   gl_Position = o2c * vec4( position, 1.0 );\n"
+	"}\n"
+);
+
+const std::string g_vectorShaderVertSourceVector120(
+	VECTOR_SHADER_GLSL_120_HEADER
+	"void main()\n"
+	"{\n"
+	"   vec3 position = ps;\n"
+	"   if( gl_VertexID == 1 )\n"
+	"   {\n"
+	"       position += vs * scale;\n"
+	"   }\n"
+	"   gl_Position = o2c * vec4( position, 1.0 );\n"
+	"}\n"
+);
+
+const std::string g_vectorShaderVertSourceBivector120(
+	VECTOR_SHADER_GLSL_120_HEADER
+	"void main()\n"
+	"{\n"
+	"   vec4 position = o2v * vec4( ps, 1.0 );\n"
+	"   if( gl_VertexID == 1 )\n"
+	"   {\n"
+	"       position.xyz += normalize( mat3( n2v ) * vs ) * ( scale * length( vs ) );\n"
+	"   }\n"
+	"   gl_Position = v2c * position;\n"
+	"}\n"
+);
+
+const std::string g_vectorShaderFragSource120(
+	"#version 120\n"
+	"uniform vec3 color;\n"
+	"uniform float opacity;\n"
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor = vec4( color, opacity );\n"
+	"}\n"
+);
+
+const std::string g_orientationShaderVertSource120(
+	"#version 120\n"
+	"#extension GL_EXT_gpu_shader4 : require\n"
+	"uniform mat4 o2c;\n"
+	"uniform float scale;\n"
+	"attribute vec3 ps;\n"
+	"attribute vec4 qs;\n"
+	"flat varying vec3 color;\n"
+	"void main()\n"
+	"{\n"
+	"   vec3 colors[ 3 ];\n"
+	"   // Match colors to `StandardStyle::colorForAxes()`\n"
+	"   colors[0] = vec3( 0.73, 0.17, 0.17 );\n"
+	"   colors[1] = vec3( 0.2, 0.57, 0.2 );\n"
+	"   colors[2] = vec3( 0.2, 0.36, 0.74 );\n"
+	"   vec3 position = ps;\n"
+	"   int axis = gl_VertexID / 2;\n"
+	"   if( ( gl_VertexID % 2 ) > 0 )\n"
+	"   {\n"
+	"       float r = qs.x;\n"
+	"       vec3  v = qs.yzw;\n"
+	"       mat3  m = mat3(\n"
+	"           1.0 - 2.0 * dot( v.yz, v.yz ),\n"
+	"                 2.0 * dot( v.xz, vec2( v.y,  r ) ),\n"
+	"                 2.0 * dot( v.zy, vec2( v.x, -r ) ),\n"
+	"                 2.0 * dot( v.xz, vec2( v.y, -r ) ),\n"
+	"           1.0 - 2.0 * dot( v.zx, v.zx ),\n"
+	"                 2.0 * dot( v.yx, vec2( v.z,  r ) ),\n"
+	"                 2.0 * dot( v.zy, vec2( v.x,  r ) ),\n"
+	"                 2.0 * dot( v.yx, vec2( v.z, -r ) ),\n"
+	"           1.0 - 2.0 * dot( v.yx, v.yx ) );\n"
+	"       position += normalize( m[ axis ] ) * scale;\n"
+	"   }\n"
+	"   gl_Position = o2c * vec4( position, 1.0 );\n"
+	"   color = colors[ axis ];\n"
+	"}\n"
+);
+
+const std::string g_orientationShaderFragSource120(
+	"#version 120\n"
+	"#extension GL_EXT_gpu_shader4 : require\n"
+	"uniform float opacity;\n"
+	"flat varying vec3 color;\n"
+	"void main()\n"
+	"{\n"
+	"   gl_FragColor = vec4( color, opacity );\n"
+	"}\n"
+);
+
+GLint uniformLocation( const char *name )
+{
+	GLint program = 0;
+	glGetIntegerv( GL_CURRENT_PROGRAM, &program );
+	return glGetUniformLocation( program, name );
+}
+
+void setUniforms( const UniformBlockColorShader &uniforms )
+{
+	glUniformMatrix4fv( uniformLocation( "o2c" ), 1, GL_FALSE, uniforms.o2c.getValue() );
+	glUniform3fv( uniformLocation( "valueMin" ), 1, uniforms.valueMin.getValue() );
+	glUniform3fv( uniformLocation( "valueRange" ), 1, uniforms.valueRange.getValue() );
+	glUniform1f( uniformLocation( "opacity" ), uniforms.opacity );
+}
+
+void setUniforms( const UniformBlockVectorShader &uniforms )
+{
+	glUniformMatrix4fv( uniformLocation( "o2v" ), 1, GL_FALSE, uniforms.o2v.getValue() );
+	glUniformMatrix4fv( uniformLocation( "n2v" ), 1, GL_FALSE, uniforms.n2v.getValue() );
+	glUniformMatrix4fv( uniformLocation( "v2c" ), 1, GL_FALSE, uniforms.v2c.getValue() );
+	glUniformMatrix4fv( uniformLocation( "o2c" ), 1, GL_FALSE, uniforms.o2c.getValue() );
+	glUniform3fv( uniformLocation( "color" ), 1, uniforms.color.getValue() );
+	glUniform1f( uniformLocation( "opacity" ), uniforms.opacity );
+	glUniform1f( uniformLocation( "scale" ), uniforms.scale );
+}
+
+void setUniforms( const UniformBlockOrientationShader &uniforms )
+{
+	glUniformMatrix4fv( uniformLocation( "o2c" ), 1, GL_FALSE, uniforms.o2c.getValue() );
+	glUniform1f( uniformLocation( "scale" ), uniforms.scale );
+	glUniform1f( uniformLocation( "opacity" ), uniforms.opacity );
+}
+
+// GL 2.1 has no shader storage buffers or atomics, so instead of the GPU
+// visibility pass for vertex labels we read back the scene depth and depth
+// test each vertex on the CPU. Like the GPU pass, which draws 3 pixel
+// points, a vertex is visible if any pixel of its 3x3 neighbourhood passes.
+
+struct SceneDepth
+{
+	int width = 0;
+	int height = 0;
+	std::vector<float> depth;
+};
+
+void readSceneDepth( SceneDepth &sceneDepth )
+{
+	GLint viewport[4];
+	glGetIntegerv( GL_VIEWPORT, viewport );
+	sceneDepth.width = viewport[2];
+	sceneDepth.height = viewport[3];
+	sceneDepth.depth.assign( (size_t)sceneDepth.width * sceneDepth.height, 1.f );
+	if( sceneDepth.depth.empty() )
+	{
+		return;
+	}
+
+	GLint readFramebuffer, drawFramebuffer, renderbuffer;
+	glGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer );
+	glGetIntegerv( GL_DRAW_FRAMEBUFFER_BINDING, &drawFramebuffer );
+	glGetIntegerv( GL_RENDERBUFFER_BINDING, &renderbuffer );
+	const GLboolean scissorEnabled = glIsEnabled( GL_SCISSOR_TEST );
+	glDisable( GL_SCISSOR_TEST );
+
+	// The viewport renders multisampled, which can't be read directly, so
+	// resolve its depth into a single sampled buffer of the same format.
+
+	GLuint depthBuffer = 0;
+	glGenRenderbuffers( 1, &depthBuffer );
+	glBindRenderbuffer( GL_RENDERBUFFER, depthBuffer );
+	glRenderbufferStorage( GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, sceneDepth.width, sceneDepth.height );
+
+	GLuint framebuffer = 0;
+	glGenFramebuffers( 1, &framebuffer );
+	glBindFramebuffer( GL_FRAMEBUFFER, framebuffer );
+	glFramebufferRenderbuffer( GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthBuffer );
+	glDrawBuffer( GL_NONE );
+	glReadBuffer( GL_NONE );
+
+	glBindFramebuffer( GL_READ_FRAMEBUFFER, drawFramebuffer );
+	glBlitFramebuffer(
+		viewport[0], viewport[1], viewport[0] + sceneDepth.width, viewport[1] + sceneDepth.height,
+		0, 0, sceneDepth.width, sceneDepth.height,
+		GL_DEPTH_BUFFER_BIT, GL_NEAREST
+	);
+	glBindFramebuffer( GL_READ_FRAMEBUFFER, framebuffer );
+	glReadPixels( 0, 0, sceneDepth.width, sceneDepth.height, GL_DEPTH_COMPONENT, GL_FLOAT, sceneDepth.depth.data() );
+
+	glBindFramebuffer( GL_READ_FRAMEBUFFER, readFramebuffer );
+	glBindFramebuffer( GL_DRAW_FRAMEBUFFER, drawFramebuffer );
+	glBindRenderbuffer( GL_RENDERBUFFER, renderbuffer );
+	glDeleteFramebuffers( 1, &framebuffer );
+	glDeleteRenderbuffers( 1, &depthBuffer );
+	if( scissorEnabled )
+	{
+		glEnable( GL_SCISSOR_TEST );
+	}
+}
+
+std::vector<std::uint32_t> vertexVisibility( const SceneDepth &sceneDepth, const std::vector<V3f> &points, const M44f &o2c )
+{
+	std::vector<std::uint32_t> visibility( points.size() / 32 + 1, 0u );
+	for( size_t i = 0; i < points.size(); ++i )
+	{
+		const V4f p = V4f( points[i].x, points[i].y, points[i].z, 1.f ) * o2c;
+		if( p.w <= 0.f )
+		{
+			continue;
+		}
+
+		// Same depth bias as the GPU pass.
+		const float z = ( p.z - std::numeric_limits<float>::epsilon() * 10.f ) / p.w * 0.5f + 0.5f;
+		if( z < 0.f )
+		{
+			continue;
+		}
+		const int x = (int)std::floor( ( p.x / p.w * 0.5f + 0.5f ) * sceneDepth.width );
+		const int y = (int)std::floor( ( p.y / p.w * 0.5f + 0.5f ) * sceneDepth.height );
+
+		bool visible = false;
+		for( int py = std::max( y - 1, 0 ); py <= std::min( y + 1, sceneDepth.height - 1 ) && !visible; ++py )
+		{
+			for( int px = std::max( x - 1, 0 ); px <= std::min( x + 1, sceneDepth.width - 1 ) && !visible; ++px )
+			{
+				visible = z <= sceneDepth.depth[(size_t)py * sceneDepth.width + px];
+			}
+		}
+
+		if( visible )
+		{
+			visibility[i / 32] |= 1u << ( i % 32 );
+		}
+	}
+	return visibility;
+}
+
+#endif
+
+'''
+
+def vt_guard(match, apple=None):
+    body = match.group(0)
+    if apple is None:
+        return "#ifndef __APPLE__\n" + body + "#endif\n"
+    return "#ifdef __APPLE__\n" + apple + "#else\n" + body + "#endif\n"
+
+if "g_colorShaderVertSource120" not in vtxt:
+    vtxt = vtxt.replace(
+        '//-----------------------------------------------------------------------------\n'
+        '// Helper Methods\n',
+        VT_APPLE_CODE +
+        '//-----------------------------------------------------------------------------\n'
+        '// Helper Methods\n',
+        1
+    )
+
+    # Constants only the uniform/storage block code uses; -Werror rejects
+    # them unused.
+    for const in (
+        'const GLuint g_uniformBlockBindingIndex = 0;\n',
+        'GLuint const g_storageBlockBindingIndex = 0;\n',
+    ):
+        vtxt = vtxt.replace(const, "#ifndef __APPLE__\n" + const + "#endif\n", 1)
+
+    vtxt = vtxt.replace(
+        '\t\t\t\t\tconst GLuint program = shader->program();\n'
+        '\t\t\t\t\tconst GLuint blockIndex = glGetUniformBlockIndex( program, "UniformBlock" );\n'
+        '\t\t\t\t\tif( blockIndex != GL_INVALID_INDEX )\n'
+        '\t\t\t\t\t{\n'
+        '\t\t\t\t\t\tglUniformBlockBinding( program, blockIndex, g_uniformBlockBindingIndex );\n'
+        '\t\t\t\t\t}\n',
+        '\t\t\t\t\tconst GLuint program = shader->program();\n'
+        '#ifdef __APPLE__\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_PS, "ps" );\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_VSX, "vsx" );\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_VSY, "vsy" );\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_VSZ, "vsz" );\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_VS, "vs" );\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_QS, "qs" );\n'
+        '\t\t\t\t\tglLinkProgram( program );\n'
+        '#else\n'
+        '\t\t\t\t\tconst GLuint blockIndex = glGetUniformBlockIndex( program, "UniformBlock" );\n'
+        '\t\t\t\t\tif( blockIndex != GL_INVALID_INDEX )\n'
+        '\t\t\t\t\t{\n'
+        '\t\t\t\t\t\tglUniformBlockBinding( program, blockIndex, g_uniformBlockBindingIndex );\n'
+        '\t\t\t\t\t}\n'
+        '#endif\n',
+        1
+    )
+
+    for shader, sources in (
+        ( "m_colorShader", ( "g_colorShaderVertSource", "g_colorShaderFragSource" ) ),
+        ( "m_vectorShaderPoint", ( "g_vectorShaderVertSourcePoint", "g_vectorShaderFragSource" ) ),
+        ( "m_vectorShaderVector", ( "g_vectorShaderVertSourceVector", "g_vectorShaderFragSource" ) ),
+        ( "m_vectorShaderBivector", ( "g_vectorShaderVertSourceBivector", "g_vectorShaderFragSource" ) ),
+        ( "m_orientationShader", ( "g_orientationShaderVertSource", "g_orientationShaderFragSource" ) ),
+    ):
+        call = "\t\t\tbuildShader( %s, %s, %s );\n" % ( shader, *sources )
+        call120 = "\t\t\tbuildShader( %s, %s120, %s120 );\n" % ( shader, *sources )
+        vtxt = vtxt.replace(call, "#ifdef __APPLE__\n" + call120 + "#else\n" + call + "#endif\n", 1)
+
+    # Vertex labels: everything from building the 430 shader up to the
+    # saved GL state only serves the GPU visibility pass.
+    vtxt = re.sub(
+        r'\t\t\tbuildShader\( m_vertexLabelShader, .*?'
+        r'\t\t\tglGetIntegerv\( GL_ARRAY_BUFFER_BINDING, &arrayBinding \);\n',
+        lambda m: vt_guard(m, '\t\t\tSceneDepth sceneDepth;\n'),
+        vtxt, count=1, flags=re.S
+    )
+    vtxt = re.sub(
+        r'\t\t\t\t// Retrieve cached opengl buffer data\n.*?'
+        r'(?=\n\t\t\t\t// Draw vertex ids or int variable offset)',
+        lambda m: (
+            '#ifdef __APPLE__\n'
+            '\t\t\t\tif( sceneDepth.depth.empty() )\n'
+            '\t\t\t\t{\n'
+            '\t\t\t\t\treadSceneDepth( sceneDepth );\n'
+            '\t\t\t\t}\n'
+            '\t\t\t\tconst std::vector<std::uint32_t> visibility = vertexVisibility( sceneDepth, pData->readable(), o2w * w2c );\n'
+            '\t\t\t\tconst std::uint32_t *vBuffer = visibility.data();\n'
+            '#else\n' + m.group(0) + '\n#endif'
+        ),
+        vtxt, count=1, flags=re.S
+    )
+    vtxt = re.sub(
+        r'\t\t\t\t\t// unmap storage buffer\n\n.*?\n\t\t\t\t}\n\n'
+        r'\t\t\t\tglBindBuffer\( GL_SHADER_STORAGE_BUFFER, storageBinding \);\n',
+        lambda m: m.group(0)
+            .replace('\t\t\t\t\t// unmap', '#ifndef __APPLE__\n\t\t\t\t\t// unmap', 1)
+            .replace('\t\t\t\t}\n\n\t\t\t\tglBindBuffer', '#endif\n\t\t\t\t}\n\n#ifndef __APPLE__\n\t\t\t\tglBindBuffer', 1)
+            + '#endif\n',
+        vtxt, count=1, flags=re.S
+    )
+
+    # Color, vector and orientation visualisers: no uniform buffers, set
+    # plain uniforms instead.
+    vtxt = re.sub(
+        r'^\t\t\tGLint uniformBinding;\n'
+        r'\t\t\tglGetIntegerv\( GL_UNIFORM_BUFFER_BINDING, &uniformBinding \);\n\n'
+        r'\t\t\tif\( !m_\w+UniformBuffer \)\n\t\t\t\{\n(?:\t\t\t\t.*\n)*?\t\t\t\}\n\n'
+        r'\t\t\tglBindBufferBase\( GL_UNIFORM_BUFFER, g_uniformBlockBindingIndex, m_\w+UniformBuffer->buffer\(\) \);\n',
+        vt_guard, vtxt, flags=re.M
+    )
+    vtxt = re.sub(
+        r'^\t\t\tglBindBuffer\( GL_UNIFORM_BUFFER, uniformBinding \);\n',
+        vt_guard, vtxt, flags=re.M
+    )
+    vtxt = re.sub(
+        r'^(\t+)glBufferData\( GL_UNIFORM_BUFFER, sizeof\( UniformBlock\w+ \), &uniforms, GL_DYNAMIC_DRAW \);\n',
+        lambda m: vt_guard(m, m.group(1) + 'setUniforms( uniforms );\n'),
+        vtxt, flags=re.M
+    )
+
+if "#ifndef __APPLE__\n\t\t\tm_vertexLabelStorageCapacity( 0 )," not in vtxt:
+    # Unused on macOS now, and -Werror rejects unused private fields.
+    for member in (
+        '\t\t\tm_vertexLabelStorageCapacity( 0 ),\n',
+        '\t\tmutable std::size_t m_vertexLabelStorageCapacity;\n',
+    ):
+        vtxt = vtxt.replace(member, "#ifndef __APPLE__\n" + member + "#endif\n", 1)
+
+vt.write_text(vtxt)
+
+expect(
+    "k VisualiserTool.cpp",
+    "#version 330" not in vtxt  # upstream moved to GLSL 1.20 itself
+        or "g_colorShaderVertSource120, g_colorShaderFragSource120" in vtxt
+        and "g_vectorShaderVertSourceBivector120, g_vectorShaderFragSource120" in vtxt
+        and "g_orientationShaderVertSource120, g_orientationShaderFragSource120" in vtxt
+        and "glBindAttribLocation( program, ATTRIB_GLSL_LOCATION_QS" in vtxt
+        and "#define glVertexAttribDivisor glVertexAttribDivisorARB" in vtxt
+        and "\t\t\tSceneDepth sceneDepth;\n#else\n\t\t\tbuildShader( m_vertexLabelShader" in vtxt
+        and "vertexVisibility( sceneDepth, pData->readable()" in vtxt
+        and "#ifndef __APPLE__\n\t\t\t\t\t// unmap storage buffer" in vtxt
+        and vtxt.count("#ifndef __APPLE__\n\t\t\tGLint uniformBinding;") == 3
+        and vtxt.count("#ifndef __APPLE__\n\t\t\tglBindBuffer( GL_UNIFORM_BUFFER, uniformBinding );") == 3
+        and vtxt.count("setUniforms( uniforms );") == 3
+        and "#ifndef __APPLE__\n\t\tmutable std::size_t m_vertexLabelStorageCapacity;" in vtxt,
+    "could not port the visualiser shaders to GLSL 1.20; the VisualiserTool would draw nothing"
 )
 
 if problems:

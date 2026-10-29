@@ -81,6 +81,10 @@ Gaffer <version> for Apple Silicon, built on macOS <N>. See the [README](https:/
 - PaintTool visualiser shader ported to GLSL 1.20, and its depth-only
   framebuffer (`DepthRender.cpp`) made complete, so painting works in the
   GL 2.1 context
+- VisualiserTool shaders ported to GLSL 1.20 (+ `EXT_gpu_shader4`, ARB
+  instancing). Its vertex label occlusion pass needs SSBOs and atomics, which
+  GL 2.1 lacks, so on macOS it reads back the viewport depth and tests each
+  vertex on the CPU
 - Menu shortcut labels (Qt 6 hides them on macOS)
 - `NSCursor set` swizzle against a cursor crash on macOS 15+. Side effect: the
   cursor never changes shape. Possibly obsolete since upstream stopped setting

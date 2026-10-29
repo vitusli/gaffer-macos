@@ -78,6 +78,9 @@ Gaffer <version> for Apple Silicon, built on macOS <N>. See the [README](https:/
 - Fallback shader so unshaded objects don't crash Cycles
 - Viewer defaults to SVM instead of OSL, so switching the viewer to Metal works
   (Metal can't do OSL and Cycles silently falls back to CPU)
+- PaintTool visualiser shader ported to GLSL 1.20, and its depth-only
+  framebuffer (`DepthRender.cpp`) made complete, so painting works in the
+  GL 2.1 context
 - Menu shortcut labels (Qt 6 hides them on macOS)
 - `NSCursor set` swizzle against a cursor crash on macOS 15+. Side effect: the
   cursor never changes shape. Possibly obsolete since upstream stopped setting

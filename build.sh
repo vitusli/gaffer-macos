@@ -7,7 +7,7 @@
 # dependencies, and compiles everything with SCons.
 #
 # Usage:
-#   bash build.sh            # builds Gaffer 1.7.5.0 (latest tested)
+#   bash build.sh            # builds Gaffer 1.7.6.0 (latest tested)
 #   TAG=latest bash build.sh # resolves the newest GafferHQ release
 #   TAG=1.6.19.1 bash build.sh
 #
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 # Latest Gaffer release this script has been built and smoke-tested against.
-DEFAULT_TAG="1.7.5.0"
+DEFAULT_TAG="1.7.6.0"
 
 TAG="${TAG:-$DEFAULT_TAG}"
 if [ "$TAG" = "latest" ]; then
@@ -237,6 +237,8 @@ PY
 #   g) shaderView.py  -- keep OSL shader previews in OSL mode
 #   h) OutputBuffer.cpp -- GL_TEXTURE_1D, GLSL 1.20, null checks
 #   i) macosDeviceSelection.py -- default to all devices, optional CPU fallback
+#   j) PaintTool.cpp  -- GLSL 1.20 paint visualiser
+#   j2) DepthRender.cpp -- depth-only framebuffer completeness
 
 apply_source_patches() {
   step "Patching source"
@@ -1067,6 +1069,189 @@ expect(
     "GL_TEXTURE_1D" in otxt and "#else // !__APPLE__" in otxt
         and "selectionSizeParam" in otxt,
     "could not apply the GL 2.1 viewport fixes; the viewer would render black"
+)
+
+# ── j) PaintTool.cpp: GLSL 1.20 paint visualiser ──
+# The PaintTool (new in 1.7.5.0) draws painted values with a GLSL 330
+# shader (uniform block, layout(location), interface blocks). The GL 2.1
+# context only compiles GLSL 1.20, so the shader fails and painting shows
+# nothing. Use a 1.20 shader with a plain mat4 uniform, and bind the
+# attribute locations by relinking instead of layout(location).
+
+pt = root / "src/GafferSceneUI/PaintTool.cpp"
+ptxt = pt.read_text()
+
+if "g_colorShaderVertSource120" not in ptxt:
+    ptxt = ptxt.replace(
+        '// Opengl vertex shader code\n',
+        '#ifdef __APPLE__\n'
+        '\n'
+        '// macOS only gives us a GL 2.1 context, which compiles GLSL 1.20.\n'
+        '\n'
+        'const std::string g_colorShaderVertSource120(\n'
+        '\t"#version 120\\n"\n'
+        '\t"uniform mat4 o2c;\\n"\n'
+        '\t"attribute vec3 ps;\\n"\n'
+        '\t"attribute float vsx;\\n"\n'
+        '\t"attribute float vsy;\\n"\n'
+        '\t"attribute float vsz;\\n"\n'
+        '\t"varying vec3 value;\\n"\n'
+        '\t"void main()\\n"\n'
+        '\t"{\\n"\n'
+        '\t"   value = vec3( vsx, vsy, vsz );\\n"\n'
+        '\t"   gl_Position = o2c * vec4( ps, 1.0 );\\n"\n'
+        '\t"}\\n"\n'
+        ');\n'
+        '\n'
+        'const std::string g_colorShaderFragSource120(\n'
+        '\t"#version 120\\n"\n'
+        '\t"varying vec3 value;\\n"\n'
+        '\t"void main()\\n"\n'
+        '\t"{\\n"\n'
+        '\t"   gl_FragColor = vec4( value, 1.0 );\\n"\n'
+        '\t"}\\n"\n'
+        ');\n'
+        '\n'
+        '#endif\n'
+        '\n'
+        '// Opengl vertex shader code\n',
+        1
+    )
+
+    ptxt = ptxt.replace(
+        '\t\t\t\t\tconst GLuint program = shader->program();\n'
+        '\t\t\t\t\tconst GLuint blockIndex = glGetUniformBlockIndex( program, "UniformBlock" );\n'
+        '\t\t\t\t\tif( blockIndex != GL_INVALID_INDEX )\n'
+        '\t\t\t\t\t{\n'
+        '\t\t\t\t\t\tglUniformBlockBinding( program, blockIndex, g_uniformBlockBindingIndex );\n'
+        '\t\t\t\t\t}\n',
+        '\t\t\t\t\tconst GLuint program = shader->program();\n'
+        '#ifdef __APPLE__\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_PS, "ps" );\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_VSX, "vsx" );\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_VSY, "vsy" );\n'
+        '\t\t\t\t\tglBindAttribLocation( program, ATTRIB_GLSL_LOCATION_VSZ, "vsz" );\n'
+        '\t\t\t\t\tglLinkProgram( program );\n'
+        '#else\n'
+        '\t\t\t\t\tconst GLuint blockIndex = glGetUniformBlockIndex( program, "UniformBlock" );\n'
+        '\t\t\t\t\tif( blockIndex != GL_INVALID_INDEX )\n'
+        '\t\t\t\t\t{\n'
+        '\t\t\t\t\t\tglUniformBlockBinding( program, blockIndex, g_uniformBlockBindingIndex );\n'
+        '\t\t\t\t\t}\n'
+        '#endif\n',
+        1
+    )
+
+    ptxt = ptxt.replace(
+        '\t\t\tbuildShader( m_colorShader, g_colorShaderVertSource, g_colorShaderFragSource );\n',
+        '#ifdef __APPLE__\n'
+        '\t\t\tbuildShader( m_colorShader, g_colorShaderVertSource120, g_colorShaderFragSource120 );\n'
+        '#else\n'
+        '\t\t\tbuildShader( m_colorShader, g_colorShaderVertSource, g_colorShaderFragSource );\n'
+        '#endif\n',
+        1
+    )
+
+    ptxt = ptxt.replace(
+        '\t\t\tGLint uniformBinding;\n'
+        '\t\t\tglGetIntegerv( GL_UNIFORM_BUFFER_BINDING, &uniformBinding );\n',
+        '#ifndef __APPLE__\n'
+        '\t\t\tGLint uniformBinding;\n'
+        '\t\t\tglGetIntegerv( GL_UNIFORM_BUFFER_BINDING, &uniformBinding );\n',
+        1
+    )
+    ptxt = ptxt.replace(
+        '\t\t\tglBindBufferBase( GL_UNIFORM_BUFFER, g_uniformBlockBindingIndex, m_colorUniformBuffer->buffer() );\n',
+        '\t\t\tglBindBufferBase( GL_UNIFORM_BUFFER, g_uniformBlockBindingIndex, m_colorUniformBuffer->buffer() );\n'
+        '#endif\n',
+        1
+    )
+
+    ptxt = ptxt.replace(
+        '\t\t\tglUseProgram( m_colorShader->program() );\n',
+        '\t\t\tglUseProgram( m_colorShader->program() );\n'
+        '#ifdef __APPLE__\n'
+        '\t\t\tconst GLint o2cLocation = glGetUniformLocation( m_colorShader->program(), "o2c" );\n'
+        '#endif\n',
+        1
+    )
+
+    ptxt = ptxt.replace(
+        '\t\t\tglVertexAttribDivisor( ATTRIB_GLSL_LOCATION_PS, 0 );\n',
+        '#ifndef __APPLE__\n'
+        '\t\t\tglVertexAttribDivisor( ATTRIB_GLSL_LOCATION_PS, 0 );\n'
+        '#endif\n',
+        1
+    )
+
+    ptxt = ptxt.replace(
+        '\t\t\t\t\tglBufferData( GL_UNIFORM_BUFFER, sizeof( UniformBlockColorShader ), &uniforms, GL_DYNAMIC_DRAW );\n',
+        '#ifdef __APPLE__\n'
+        '\t\t\t\t\tglUniformMatrix4fv( o2cLocation, 1, GL_FALSE, uniforms.o2c.getValue() );\n'
+        '#else\n'
+        '\t\t\t\t\tglBufferData( GL_UNIFORM_BUFFER, sizeof( UniformBlockColorShader ), &uniforms, GL_DYNAMIC_DRAW );\n'
+        '#endif\n',
+        1
+    )
+
+    ptxt = ptxt.replace(
+        '\t\t\tglBindBuffer( GL_UNIFORM_BUFFER, uniformBinding );\n',
+        '#ifndef __APPLE__\n'
+        '\t\t\tglBindBuffer( GL_UNIFORM_BUFFER, uniformBinding );\n'
+        '#endif\n',
+        1
+    )
+
+if "#ifndef __APPLE__\nconst GLuint g_uniformBlockBindingIndex" not in ptxt:
+    # Unused on macOS now, and -Werror rejects unused constants.
+    ptxt = ptxt.replace(
+        'const GLuint g_uniformBlockBindingIndex = 0;\n',
+        '#ifndef __APPLE__\n'
+        'const GLuint g_uniformBlockBindingIndex = 0;\n'
+        '#endif\n',
+        1
+    )
+
+pt.write_text(ptxt)
+
+expect(
+    "j PaintTool.cpp",
+    "#version 330" not in ptxt  # upstream moved to GLSL 1.20 itself
+        or ptxt.count("#ifdef __APPLE__") + ptxt.count("#ifndef __APPLE__") >= 9
+        and "glUniformMatrix4fv( o2cLocation" in ptxt
+        and "g_colorShaderVertSource120, g_colorShaderFragSource120" in ptxt,
+    "could not port the paint visualiser to GLSL 1.20; painting would show nothing"
+)
+
+# ── j2) DepthRender.cpp: complete depth-only framebuffer ──
+# The PaintTool renders the brush footprint into a depth-only framebuffer.
+# In the GL 2.1 context that is GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER unless
+# the draw and read buffers are GL_NONE, so strokes never applied.
+
+dr = root / "src/GafferSceneUI/DepthRender.cpp"
+drtxt = dr.read_text()
+if "glDrawBuffer( GL_NONE )" not in drtxt:
+    drtxt = drtxt.replace(
+        '\tglFramebufferRenderbuffer( GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_depthBuffer );\n',
+        '\tglFramebufferRenderbuffer( GL_DRAW_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_depthBuffer );\n'
+        '\n'
+        '#ifdef __APPLE__\n'
+        '\t// The macOS GL 2.1 context rejects a depth-only framebuffer unless\n'
+        '\t// its colour draw and read buffers are disabled.\n'
+        '\tglDrawBuffer( GL_NONE );\n'
+        '\tGLint readFramebuffer = 0;\n'
+        '\tglGetIntegerv( GL_READ_FRAMEBUFFER_BINDING, &readFramebuffer );\n'
+        '\tglBindFramebuffer( GL_READ_FRAMEBUFFER, m_framebuffer );\n'
+        '\tglReadBuffer( GL_NONE );\n'
+        '\tglBindFramebuffer( GL_READ_FRAMEBUFFER, readFramebuffer );\n'
+        '#endif\n',
+        1
+    )
+    dr.write_text(drtxt)
+expect(
+    "j2 DepthRender.cpp",
+    "glDrawBuffer( GL_NONE )" in drtxt,
+    "could not fix the depth-only framebuffer; paint strokes would not apply"
 )
 
 if problems:

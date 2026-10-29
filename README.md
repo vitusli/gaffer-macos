@@ -17,14 +17,14 @@ to fix bugs.
 
 ```bash
 mkdir -p ~/gaffer
-curl -L https://github.com/vitusli/gaffer-macos/releases/download/v1.7.5.0/gaffer-1.7.5.0-macos-arm64.tar.gz | tar xz -C ~/gaffer
-~/gaffer/build-1.7.5.0/bin/gaffer
+curl -L https://github.com/vitusli/gaffer-macos/releases/download/v1.7.6.0/gaffer-1.7.6.0-macos-arm64.tar.gz | tar xz -C ~/gaffer
+~/gaffer/build-1.7.6.0/bin/gaffer
 ```
 
 If you download from the [Releases](https://github.com/vitusli/gaffer-macos/releases/latest)
 page in the browser instead, macOS will block every `.dylib` because the build
 isn't signed. Fix that after extracting with
-`xattr -dr com.apple.quarantine ~/gaffer/build-1.7.5.0`.
+`xattr -dr com.apple.quarantine ~/gaffer/build-1.7.6.0`.
 
 ## GPU rendering (Metal)
 
